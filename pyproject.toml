@@ -1,0 +1,126 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graphann"
+version = "0.1.0"
+description = "Official Python SDK for the GraphANN vector database."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "GraphANN", email = "support@graphann.com" }]
+keywords = ["graphann", "vector-database", "vector-search", "embeddings", "ann"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: Other/Proprietary License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.27,<1.0",
+  "pydantic>=2.5,<3.0",
+]
+
+[project.urls]
+Homepage = "https://graphann.com"
+Documentation = "https://graphann.com/docs"
+Source = "https://github.com/lukaszraczylo/graphann-clients"
+Issues = "https://graphann.com/contact"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "pytest-httpx>=0.30",
+  "respx>=0.21",
+  "mypy>=1.10",
+  "ruff>=0.5",
+  "build>=1.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/graphann"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/graphann",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md",
+  "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-ra -q"
+filterwarnings = [
+  "error",
+  "ignore::DeprecationWarning:pytest_asyncio.*",
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/graphann"]
+warn_unused_configs = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+strict_concatenate = true
+
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",     # pycodestyle errors
+  "W",     # pycodestyle warnings
+  "F",     # Pyflakes
+  "I",     # isort
+  "B",     # flake8-bugbear
+  "C4",    # flake8-comprehensions
+  "UP",    # pyupgrade
+  "SIM",   # flake8-simplify
+  "PIE",   # flake8-pie
+  "RUF",   # ruff-specific
+  "PT",    # flake8-pytest-style
+  "TID",   # flake8-tidy-imports
+  "ARG",   # flake8-unused-arguments
+  "PLE",   # Pylint errors
+]
+ignore = [
+  "E501",   # line too long (formatter handles it)
+  "B008",   # do not perform function call in argument defaults
+  "SIM105", # use contextlib.suppress (less readable for hot paths)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002", "PLR2004"]
+"examples/*" = ["ARG001", "ARG002"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
