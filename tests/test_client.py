@@ -48,7 +48,9 @@ def test_health_returns_parsed_model(httpx_mock: HTTPXMock, url: str) -> None:
     assert h.status == "healthy"
 
 
-def test_create_tenant_posts_body_and_parses_response(httpx_mock: HTTPXMock, url: str) -> None:
+def test_create_tenant_posts_body_and_parses_response(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
     httpx_mock.add_response(
         url=f"{url}/v1/tenants",
         method="POST",
@@ -228,7 +230,9 @@ def test_large_body_is_gzipped(httpx_mock: HTTPXMock, url: str) -> None:
     assert parsed["documents"][0]["text"] == big_text
 
 
-def test_response_cache_avoids_duplicate_requests(httpx_mock: HTTPXMock, url: str) -> None:
+def test_response_cache_avoids_duplicate_requests(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
     httpx_mock.add_response(
         url=f"{url}/v1/tenants",
         method="GET",
@@ -341,7 +345,9 @@ def test_metrics_hook_invoked(httpx_mock: HTTPXMock, url: str) -> None:
     )
     with make_client(url, metrics_hook=hook) as c:
         c.health()
-    assert any(name == "graphann.http.request_duration_seconds" for name, _, _ in captured)
+    assert any(
+        name == "graphann.http.request_duration_seconds" for name, _, _ in captured
+    )
 
 
 def test_search_filter_passthrough(httpx_mock: HTTPXMock, url: str) -> None:
@@ -377,3 +383,110 @@ def test_user_agent_carries_version(httpx_mock: HTTPXMock, url: str) -> None:
     req = httpx_mock.get_request()
     assert req is not None
     assert __version__ in req.headers["User-Agent"]
+
+
+def test_get_chunk_returns_typed_model(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/chunks/42",
+        method="GET",
+        json={
+            "chunk_id": 42,
+            "text": "the quick brown fox",
+            "document_id": 7,
+            "chunk_index": 2,
+            "start": 64,
+            "end": 84,
+        },
+    )
+    with make_client(url) as c:
+        chunk = c.get_chunk("t_unit", "i_1", 42)
+    assert chunk.chunk_id == 42
+    assert chunk.text == "the quick brown fox"
+    assert chunk.document_id == 7
+    assert chunk.start == 64
+    assert chunk.end == 84
+
+
+def test_delete_chunks_sends_id_list_to_placeholder_path(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/chunks/0",
+        method="DELETE",
+        json={"deleted": 3, "index_id": "i_1"},
+    )
+    with make_client(url) as c:
+        resp = c.delete_chunks("t_unit", "i_1", [10, 11, 12])
+    assert resp.deleted == 3
+    assert resp.index_id == "i_1"
+    req = httpx_mock.get_request()
+    assert req is not None
+    assert json.loads(req.content) == {"chunk_ids": [10, 11, 12]}
+
+
+def test_delete_chunks_rejects_empty_list(url: str) -> None:
+    with make_client(url) as c, pytest.raises(
+        ValueError, match="at least one chunk id"
+    ):
+        c.delete_chunks("t_unit", "i_1", [])
+
+
+def test_get_llm_settings_uses_canonical_path(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/orgs/org_1/llm-settings",
+        method="GET",
+        json={
+            "provider": "openai",
+            "model": "gpt-4",
+            "api_key": "***abcd",
+            "temperature": 0.2,
+            "max_tokens": 1024,
+        },
+    )
+    with make_client(url) as c:
+        s = c.get_llm_settings("org_1")
+    assert s.provider == "openai"
+    assert s.api_key == "***abcd"
+
+
+def test_update_llm_settings_uses_patch_and_returns_raw_settings(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/orgs/org_1/llm-settings",
+        method="PATCH",
+        json={
+            "provider": "anthropic",
+            "model": "claude-opus-4",
+            "api_key": "***wxyz",
+            "temperature": 0.1,
+            "max_tokens": 2048,
+        },
+    )
+    with make_client(url) as c:
+        merged = c.update_llm_settings(
+            "org_1",
+            {"provider": "anthropic", "model": "claude-opus-4"},
+        )
+    assert merged.provider == "anthropic"
+    assert merged.model == "claude-opus-4"
+    req = httpx_mock.get_request()
+    assert req is not None
+    assert req.method == "PATCH"
+    assert json.loads(req.content) == {
+        "provider": "anthropic",
+        "model": "claude-opus-4",
+    }
+
+
+def test_delete_llm_settings_uses_canonical_path(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/orgs/org_1/llm-settings",
+        method="DELETE",
+        json={"provider": "ollama", "model": "llama3.2:3b"},
+    )
+    with make_client(url) as c:
+        resp = c.delete_llm_settings("org_1")
+    assert resp == {"provider": "ollama", "model": "llama3.2:3b"}

@@ -27,7 +27,9 @@ def make_client(**kwargs: object) -> AsyncClient:
 @pytest.mark.asyncio
 async def test_health() -> None:
     with respx.mock(assert_all_called=True) as mock:
-        mock.get(f"{URL}/health").mock(return_value=httpx.Response(200, json={"status": "healthy"}))
+        mock.get(f"{URL}/health").mock(
+            return_value=httpx.Response(200, json={"status": "healthy"})
+        )
         async with make_client() as c:
             h = await c.health()
     assert h.status == "healthy"
@@ -97,10 +99,15 @@ async def test_async_singleflight() -> None:
         return httpx.Response(200, json={"results": [], "total": 0})
 
     with respx.mock() as mock:
-        mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search/text").mock(side_effect=respond)
+        mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search/text").mock(
+            side_effect=respond
+        )
 
         async with make_client() as c:
-            tasks = [asyncio.create_task(c.search_text("t_unit", "i_1", "hello")) for _ in range(3)]
+            tasks = [
+                asyncio.create_task(c.search_text("t_unit", "i_1", "hello"))
+                for _ in range(3)
+            ]
             # Yield control so all three tasks run their request setup
             # and reach the singleflight gate.
             await asyncio.sleep(0.05)
@@ -155,6 +162,92 @@ async def test_async_auth_error() -> None:
         async with make_client() as c:
             with pytest.raises(AuthenticationError):
                 await c.list_tenants()
+
+
+@pytest.mark.asyncio
+async def test_async_get_chunk_returns_typed_model() -> None:
+    payload = {
+        "chunk_id": 42,
+        "text": "the quick brown fox",
+        "document_id": 7,
+        "chunk_index": 2,
+        "start": 64,
+        "end": 84,
+    }
+    with respx.mock() as mock:
+        mock.get(f"{URL}/v1/tenants/t_unit/indexes/i_1/chunks/42").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with make_client() as c:
+            chunk = await c.get_chunk("t_unit", "i_1", 42)
+    assert chunk.chunk_id == 42
+    assert chunk.text == "the quick brown fox"
+    assert chunk.document_id == 7
+
+
+@pytest.mark.asyncio
+async def test_async_delete_chunks_sends_id_list() -> None:
+    import json
+
+    with respx.mock() as mock:
+        route = mock.delete(f"{URL}/v1/tenants/t_unit/indexes/i_1/chunks/0").mock(
+            return_value=httpx.Response(200, json={"deleted": 2, "index_id": "i_1"})
+        )
+        async with make_client() as c:
+            resp = await c.delete_chunks("t_unit", "i_1", [4, 5])
+    assert resp.deleted == 2
+    assert resp.index_id == "i_1"
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"chunk_ids": [4, 5]}
+
+
+@pytest.mark.asyncio
+async def test_async_update_llm_settings_uses_patch() -> None:
+    import json
+
+    payload = {
+        "provider": "anthropic",
+        "model": "claude-opus-4",
+        "api_key": "***wxyz",
+        "temperature": 0.1,
+        "max_tokens": 2048,
+    }
+    with respx.mock() as mock:
+        route = mock.patch(f"{URL}/v1/orgs/org_1/llm-settings").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with make_client() as c:
+            merged = await c.update_llm_settings(
+                "org_1", {"provider": "anthropic", "model": "claude-opus-4"}
+            )
+    assert merged.provider == "anthropic"
+    assert merged.model == "claude-opus-4"
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"provider": "anthropic", "model": "claude-opus-4"}
+
+
+@pytest.mark.asyncio
+async def test_async_get_llm_settings_uses_canonical_path() -> None:
+    payload = {"provider": "openai", "model": "gpt-4", "api_key": "***abcd"}
+    with respx.mock() as mock:
+        mock.get(f"{URL}/v1/orgs/org_1/llm-settings").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with make_client() as c:
+            s = await c.get_llm_settings("org_1")
+    assert s.provider == "openai"
+    assert s.api_key == "***abcd"
+
+
+@pytest.mark.asyncio
+async def test_async_delete_llm_settings_uses_canonical_path() -> None:
+    with respx.mock() as mock:
+        mock.delete(f"{URL}/v1/orgs/org_1/llm-settings").mock(
+            return_value=httpx.Response(200, json={"provider": "ollama"})
+        )
+        async with make_client() as c:
+            resp = await c.delete_llm_settings("org_1")
+    assert resp == {"provider": "ollama"}
 
 
 @pytest.mark.asyncio

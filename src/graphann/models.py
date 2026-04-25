@@ -21,6 +21,7 @@ __all__ = [
     "BulkDeleteByExternalIdsResponse",
     "BulkDeleteRequest",
     "BulkDeleteResponse",
+    "Chunk",
     "CleanupOrphansResponse",
     "ClusterHealth",
     "ClusterNode",
@@ -30,6 +31,7 @@ __all__ = [
     "CreateApiKeyRequest",
     "CreateIndexRequest",
     "CreateTenantRequest",
+    "DeleteChunksResponse",
     "Document",
     "DocumentInput",
     "DocumentListEntry",
@@ -120,7 +122,9 @@ class CreateTenantRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-IndexStatusValue = Literal["empty", "building", "ready", "error", "compacting", "cleared"]
+IndexStatusValue = Literal[
+    "empty", "building", "ready", "error", "compacting", "cleared"
+]
 
 
 class Index(_Loose):
@@ -248,6 +252,29 @@ class BulkDeleteByExternalIdsResponse(_Loose):
     documents_deleted: int
     chunks_deleted: int
     deleted_per_id: dict[str, int] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Chunks
+# ---------------------------------------------------------------------------
+
+
+class Chunk(_Loose):
+    """Chunk detail returned by ``GET /chunks/{chunkID}``."""
+
+    chunk_id: int
+    text: str | None = None
+    document_id: int | None = None
+    chunk_index: int | None = None
+    start: int | None = None
+    end: int | None = None
+
+
+class DeleteChunksResponse(_Loose):
+    """Response for ``DELETE /chunks/{chunkID}`` (body carries the id list)."""
+
+    deleted: int = 0
+    index_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

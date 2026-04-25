@@ -4,6 +4,27 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-25
+
+### Added
+
+- `Client.get_chunk` / `AsyncClient.get_chunk` — `GET
+  /v1/tenants/{tenantID}/indexes/{indexID}/chunks/{chunkID}`. Returns the
+  new `Chunk` model.
+- `Client.delete_chunks` / `AsyncClient.delete_chunks` — `DELETE
+  /v1/tenants/{tenantID}/indexes/{indexID}/chunks/{chunkID}`. Sends the
+  full id list in the request body in a single call (matches the Go SDK
+  `DeleteChunks` semantics; the path id is a placeholder).
+
+### Changed
+
+- LLM settings now hit the canonical `/v1/orgs/{orgID}/llm-settings`
+  routes instead of the unwired `/v1/orgs/{orgID}/settings/llm` paths.
+- `update_llm_settings` switched from `PUT` to `PATCH` (partial-merge)
+  and now returns the raw `LLMSettings` payload — the previous envelope
+  (`message` / `org_id` / `settings`) is no longer emitted by the
+  server. Function signatures are unchanged.
+
 ## [0.1.0] - 2026-04-25
 
 ### Added

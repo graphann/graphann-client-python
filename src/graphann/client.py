@@ -200,7 +200,10 @@ class Client:
                 )
             except httpx.HTTPError as exc:
                 last_exc = exc
-                if not is_retriable_transport_error(exc) or attempt >= self._retry.max_retries:
+                if (
+                    not is_retriable_transport_error(exc)
+                    or attempt >= self._retry.max_retries
+                ):
                     safe_metrics(
                         self.metrics_hook,
                         "graphann.http.request_error_total",
@@ -214,7 +217,10 @@ class Client:
                 continue
 
             status = response.status_code
-            if status in self._retry.retry_on_status and attempt < self._retry.max_retries:
+            if (
+                status in self._retry.retry_on_status
+                and attempt < self._retry.max_retries
+            ):
                 retry_after: float | None = None
                 if status in (429, 503):
                     retry_after = parse_retry_after(response.headers.get("Retry-After"))
@@ -253,7 +259,9 @@ class Client:
         )
         cache_key: str | None = None
         if cacheable and self._cache is not None and method.upper() in {"GET", "POST"}:
-            cache_key = make_cache_key(method, path, plan.cache_payload(), self.tenant_id)
+            cache_key = make_cache_key(
+                method, path, plan.cache_payload(), self.tenant_id
+            )
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
@@ -349,13 +357,17 @@ class Client:
         description: str | None = None,
         id: str | None = None,
     ) -> M.Index:
-        body = self._dump(M.CreateIndexRequest(name=name, description=description, id=id))
+        body = self._dump(
+            M.CreateIndexRequest(name=name, description=description, id=id)
+        )
         data = self._request("POST", f"/v1/tenants/{tenant_id}/indexes", body=body)
         self._invalidate_search_cache()
         return self._validate(M.Index, data)
 
     def get_index(self, tenant_id: str, index_id: str) -> M.Index:
-        data = self._request("GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}", cacheable=True)
+        data = self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}", cacheable=True
+        )
         return self._validate(M.Index, data)
 
     def update_index(
@@ -367,7 +379,9 @@ class Client:
         description: str | None = None,
     ) -> M.Index:
         body = self._dump(M.UpdateIndexRequest(name=name, description=description))
-        data = self._request("PATCH", f"/v1/tenants/{tenant_id}/indexes/{index_id}", body=body)
+        data = self._request(
+            "PATCH", f"/v1/tenants/{tenant_id}/indexes/{index_id}", body=body
+        )
         self._invalidate_search_cache()
         return self._validate(M.Index, data)
 
@@ -376,23 +390,33 @@ class Client:
         self._invalidate_search_cache()
 
     def get_index_status(self, tenant_id: str, index_id: str) -> M.IndexStatus:
-        data = self._request("GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/status")
+        data = self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/status"
+        )
         return self._validate(M.IndexStatus, data)
 
     def get_live_stats(self, tenant_id: str, index_id: str) -> M.LiveIndexStats:
-        data = self._request("GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/live-stats")
+        data = self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/live-stats"
+        )
         return self._validate(M.LiveIndexStats, data)
 
     def build_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/build")
+        data = self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/build"
+        )
         return data if isinstance(data, dict) else {}
 
     def compact_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/compact")
+        data = self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/compact"
+        )
         return data if isinstance(data, dict) else {}
 
     def clear_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/clear")
+        data = self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/clear"
+        )
         self._invalidate_search_cache()
         return data if isinstance(data, dict) else {}
 
@@ -450,19 +474,29 @@ class Client:
         return self._validate(M.ImportDocumentsResponse, data)
 
     def get_pending_status(self, tenant_id: str, index_id: str) -> M.PendingStatus:
-        data = self._request("GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending")
+        data = self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending"
+        )
         return self._validate(M.PendingStatus, data)
 
-    def process_pending(self, tenant_id: str, index_id: str) -> M.ProcessPendingResponse:
-        data = self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/process")
+    def process_pending(
+        self, tenant_id: str, index_id: str
+    ) -> M.ProcessPendingResponse:
+        data = self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/process"
+        )
         self._invalidate_search_cache()
         return self._validate(M.ProcessPendingResponse, data)
 
     def clear_pending(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = self._request("DELETE", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending")
+        data = self._request(
+            "DELETE", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending"
+        )
         return data if isinstance(data, dict) else {}
 
-    def get_document(self, tenant_id: str, index_id: str, document_id: int | str) -> M.Document:
+    def get_document(
+        self, tenant_id: str, index_id: str, document_id: int | str
+    ) -> M.Document:
         data = self._request(
             "GET",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents/{document_id}",
@@ -539,6 +573,38 @@ class Client:
         return self._validate(M.CleanupOrphansResponse, data)
 
     # ==================================================================
+    # Chunks
+    # ==================================================================
+
+    def get_chunk(self, tenant_id: str, index_id: str, chunk_id: int | str) -> M.Chunk:
+        """``GET /v1/tenants/{tenantID}/indexes/{indexID}/chunks/{chunkID}``."""
+        data = self._request(
+            "GET",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/chunks/{chunk_id}",
+        )
+        return self._validate(M.Chunk, data)
+
+    def delete_chunks(
+        self, tenant_id: str, index_id: str, chunk_ids: list[int]
+    ) -> M.DeleteChunksResponse:
+        """``DELETE /v1/tenants/{tenantID}/indexes/{indexID}/chunks/{chunkID}``.
+
+        The server route is per-chunk but accepts the full list in the body;
+        we send a single request with ``{"chunk_ids": [...]}`` and a placeholder
+        path id (``0``). Matches the Go SDK ``DeleteChunks`` semantics.
+        """
+        if not chunk_ids:
+            raise ValueError("delete_chunks requires at least one chunk id")
+        body = {"chunk_ids": list(chunk_ids)}
+        data = self._request(
+            "DELETE",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/chunks/0",
+            body=body,
+        )
+        self._invalidate_search_cache()
+        return self._validate(M.DeleteChunksResponse, data)
+
+    # ==================================================================
     # Search
     # ==================================================================
 
@@ -557,7 +623,9 @@ class Client:
         """Hybrid search. Pass either ``query`` (text) or ``vector``."""
         if query is None and vector is None:
             raise ValueError("search requires either query or vector")
-        body = M.SearchRequest(query=query, vector=vector, k=k, filter=_coerce_filter(filter))
+        body = M.SearchRequest(
+            query=query, vector=vector, k=k, filter=_coerce_filter(filter)
+        )
         data = self._request(
             "POST",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/search",
@@ -678,7 +746,9 @@ class Client:
         return self._validate(M.MultiSearchResponse, data)
 
     def list_user_indexes(self, org_id: str, user_id: str) -> M.OrgIndexList:
-        data = self._request("GET", f"/v1/orgs/{org_id}/users/{user_id}/indexes", cacheable=True)
+        data = self._request(
+            "GET", f"/v1/orgs/{org_id}/users/{user_id}/indexes", cacheable=True
+        )
         return self._validate(M.OrgIndexList, data)
 
     def list_shared_indexes(self, org_id: str) -> M.OrgIndexList:
@@ -766,21 +836,30 @@ class Client:
     # ==================================================================
 
     def get_llm_settings(self, org_id: str) -> M.LLMSettings:
-        data = self._request("GET", f"/v1/orgs/{org_id}/settings/llm", cacheable=True)
+        """``GET /v1/orgs/{orgID}/llm-settings`` (api_key returned masked)."""
+        data = self._request("GET", f"/v1/orgs/{org_id}/llm-settings", cacheable=True)
         return self._validate(M.LLMSettings, data)
 
     def update_llm_settings(
         self, org_id: str, settings: M.LLMSettings | dict[str, Any]
-    ) -> M.LLMSettingsResponse:
+    ) -> M.LLMSettings:
+        """``PATCH /v1/orgs/{orgID}/llm-settings`` — partial-merge update.
+
+        Only fields present in ``settings`` are overwritten; omitted fields
+        keep their server-side values. Returns the merged settings with
+        ``api_key`` masked. Note: server return shape changed from envelope
+        (pre-0.1.1) to raw ``LLMSettings`` (0.1.1+).
+        """
         if isinstance(settings, dict):
             settings = M.LLMSettings.model_validate(settings)
         body = settings.model_dump(mode="json", exclude_none=True)
-        data = self._request("PUT", f"/v1/orgs/{org_id}/settings/llm", body=body)
+        data = self._request("PATCH", f"/v1/orgs/{org_id}/llm-settings", body=body)
         self._invalidate_search_cache()
-        return self._validate(M.LLMSettingsResponse, data)
+        return self._validate(M.LLMSettings, data)
 
     def delete_llm_settings(self, org_id: str) -> dict[str, Any]:
-        data = self._request("DELETE", f"/v1/orgs/{org_id}/settings/llm")
+        """``DELETE /v1/orgs/{orgID}/llm-settings`` — reset to defaults."""
+        data = self._request("DELETE", f"/v1/orgs/{org_id}/llm-settings")
         self._invalidate_search_cache()
         return data if isinstance(data, dict) else {}
 
@@ -791,7 +870,9 @@ class Client:
     def create_api_key(
         self, tenant_id: str, user_id: str, *, description: str | None = None
     ) -> M.ApiKey:
-        body = self._dump(M.CreateApiKeyRequest(user_id=user_id, description=description))
+        body = self._dump(
+            M.CreateApiKeyRequest(user_id=user_id, description=description)
+        )
         data = self._request("POST", f"/v1/tenants/{tenant_id}/api-keys", body=body)
         return self._validate(M.ApiKey, data)
 

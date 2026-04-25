@@ -169,7 +169,10 @@ class AsyncClient:
                     content=plan.body,
                 )
             except httpx.HTTPError as exc:
-                if not is_retriable_transport_error(exc) or attempt >= self._retry.max_retries:
+                if (
+                    not is_retriable_transport_error(exc)
+                    or attempt >= self._retry.max_retries
+                ):
                     safe_metrics(
                         self.metrics_hook,
                         "graphann.http.request_error_total",
@@ -183,7 +186,10 @@ class AsyncClient:
                 continue
 
             status = response.status_code
-            if status in self._retry.retry_on_status and attempt < self._retry.max_retries:
+            if (
+                status in self._retry.retry_on_status
+                and attempt < self._retry.max_retries
+            ):
                 retry_after: float | None = None
                 if status in (429, 503):
                     retry_after = parse_retry_after(response.headers.get("Retry-After"))
@@ -218,7 +224,9 @@ class AsyncClient:
         )
         cache_key: str | None = None
         if cacheable and self._cache is not None and method.upper() in {"GET", "POST"}:
-            cache_key = make_cache_key(method, path, plan.cache_payload(), self.tenant_id)
+            cache_key = make_cache_key(
+                method, path, plan.cache_payload(), self.tenant_id
+            )
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
@@ -304,7 +312,9 @@ class AsyncClient:
     # ==================================================================
 
     async def list_indexes(self, tenant_id: str) -> list[M.Index]:
-        data = await self._request("GET", f"/v1/tenants/{tenant_id}/indexes", cacheable=True)
+        data = await self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes", cacheable=True
+        )
         return self._validate(M.IndexList, data).indexes
 
     async def create_index(
@@ -315,8 +325,12 @@ class AsyncClient:
         description: str | None = None,
         id: str | None = None,
     ) -> M.Index:
-        body = self._dump(M.CreateIndexRequest(name=name, description=description, id=id))
-        data = await self._request("POST", f"/v1/tenants/{tenant_id}/indexes", body=body)
+        body = self._dump(
+            M.CreateIndexRequest(name=name, description=description, id=id)
+        )
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes", body=body
+        )
         self._invalidate_search_cache()
         return self._validate(M.Index, data)
 
@@ -346,23 +360,33 @@ class AsyncClient:
         self._invalidate_search_cache()
 
     async def get_index_status(self, tenant_id: str, index_id: str) -> M.IndexStatus:
-        data = await self._request("GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/status")
+        data = await self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/status"
+        )
         return self._validate(M.IndexStatus, data)
 
     async def get_live_stats(self, tenant_id: str, index_id: str) -> M.LiveIndexStats:
-        data = await self._request("GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/live-stats")
+        data = await self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/live-stats"
+        )
         return self._validate(M.LiveIndexStats, data)
 
     async def build_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = await self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/build")
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/build"
+        )
         return data if isinstance(data, dict) else {}
 
     async def compact_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = await self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/compact")
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/compact"
+        )
         return data if isinstance(data, dict) else {}
 
     async def clear_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = await self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/clear")
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/clear"
+        )
         self._invalidate_search_cache()
         return data if isinstance(data, dict) else {}
 
@@ -400,17 +424,27 @@ class AsyncClient:
         self._invalidate_search_cache()
         return self._validate(M.ImportDocumentsResponse, data)
 
-    async def get_pending_status(self, tenant_id: str, index_id: str) -> M.PendingStatus:
-        data = await self._request("GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending")
+    async def get_pending_status(
+        self, tenant_id: str, index_id: str
+    ) -> M.PendingStatus:
+        data = await self._request(
+            "GET", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending"
+        )
         return self._validate(M.PendingStatus, data)
 
-    async def process_pending(self, tenant_id: str, index_id: str) -> M.ProcessPendingResponse:
-        data = await self._request("POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/process")
+    async def process_pending(
+        self, tenant_id: str, index_id: str
+    ) -> M.ProcessPendingResponse:
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/process"
+        )
         self._invalidate_search_cache()
         return self._validate(M.ProcessPendingResponse, data)
 
     async def clear_pending(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = await self._request("DELETE", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending")
+        data = await self._request(
+            "DELETE", f"/v1/tenants/{tenant_id}/indexes/{index_id}/pending"
+        )
         return data if isinstance(data, dict) else {}
 
     async def get_document(
@@ -487,6 +521,39 @@ class AsyncClient:
         return self._validate(M.CleanupOrphansResponse, data)
 
     # ==================================================================
+    # Chunks
+    # ==================================================================
+
+    async def get_chunk(
+        self, tenant_id: str, index_id: str, chunk_id: int | str
+    ) -> M.Chunk:
+        """``GET /v1/tenants/{tenantID}/indexes/{indexID}/chunks/{chunkID}``."""
+        data = await self._request(
+            "GET",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/chunks/{chunk_id}",
+        )
+        return self._validate(M.Chunk, data)
+
+    async def delete_chunks(
+        self, tenant_id: str, index_id: str, chunk_ids: list[int]
+    ) -> M.DeleteChunksResponse:
+        """``DELETE /v1/tenants/{tenantID}/indexes/{indexID}/chunks/{chunkID}``.
+
+        Single call with ``{"chunk_ids": [...]}`` body and a placeholder path
+        id; matches the Go SDK ``DeleteChunks`` semantics.
+        """
+        if not chunk_ids:
+            raise ValueError("delete_chunks requires at least one chunk id")
+        body = {"chunk_ids": list(chunk_ids)}
+        data = await self._request(
+            "DELETE",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/chunks/0",
+            body=body,
+        )
+        self._invalidate_search_cache()
+        return self._validate(M.DeleteChunksResponse, data)
+
+    # ==================================================================
     # Search
     # ==================================================================
 
@@ -504,7 +571,9 @@ class AsyncClient:
     ) -> list[M.SearchResult]:
         if query is None and vector is None:
             raise ValueError("search requires either query or vector")
-        body = M.SearchRequest(query=query, vector=vector, k=k, filter=_coerce_filter(filter))
+        body = M.SearchRequest(
+            query=query, vector=vector, k=k, filter=_coerce_filter(filter)
+        )
         data = await self._request(
             "POST",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/search",
@@ -630,7 +699,9 @@ class AsyncClient:
         return self._validate(M.OrgIndexList, data)
 
     async def list_shared_indexes(self, org_id: str) -> M.OrgIndexList:
-        data = await self._request("GET", f"/v1/orgs/{org_id}/shared/indexes", cacheable=True)
+        data = await self._request(
+            "GET", f"/v1/orgs/{org_id}/shared/indexes", cacheable=True
+        )
         return self._validate(M.OrgIndexList, data)
 
     # ==================================================================
@@ -713,21 +784,33 @@ class AsyncClient:
     # ==================================================================
 
     async def get_llm_settings(self, org_id: str) -> M.LLMSettings:
-        data = await self._request("GET", f"/v1/orgs/{org_id}/settings/llm", cacheable=True)
+        """``GET /v1/orgs/{orgID}/llm-settings`` (api_key returned masked)."""
+        data = await self._request(
+            "GET", f"/v1/orgs/{org_id}/llm-settings", cacheable=True
+        )
         return self._validate(M.LLMSettings, data)
 
     async def update_llm_settings(
         self, org_id: str, settings: M.LLMSettings | dict[str, Any]
-    ) -> M.LLMSettingsResponse:
+    ) -> M.LLMSettings:
+        """``PATCH /v1/orgs/{orgID}/llm-settings`` — partial-merge update.
+
+        Only fields present in ``settings`` are overwritten. Server returns
+        the merged settings with ``api_key`` masked. Return type changed
+        from envelope (pre-0.1.1) to raw ``LLMSettings`` (0.1.1+).
+        """
         if isinstance(settings, dict):
             settings = M.LLMSettings.model_validate(settings)
         body = settings.model_dump(mode="json", exclude_none=True)
-        data = await self._request("PUT", f"/v1/orgs/{org_id}/settings/llm", body=body)
+        data = await self._request(
+            "PATCH", f"/v1/orgs/{org_id}/llm-settings", body=body
+        )
         self._invalidate_search_cache()
-        return self._validate(M.LLMSettingsResponse, data)
+        return self._validate(M.LLMSettings, data)
 
     async def delete_llm_settings(self, org_id: str) -> dict[str, Any]:
-        data = await self._request("DELETE", f"/v1/orgs/{org_id}/settings/llm")
+        """``DELETE /v1/orgs/{orgID}/llm-settings`` — reset to defaults."""
+        data = await self._request("DELETE", f"/v1/orgs/{org_id}/llm-settings")
         self._invalidate_search_cache()
         return data if isinstance(data, dict) else {}
 
@@ -738,16 +821,24 @@ class AsyncClient:
     async def create_api_key(
         self, tenant_id: str, user_id: str, *, description: str | None = None
     ) -> M.ApiKey:
-        body = self._dump(M.CreateApiKeyRequest(user_id=user_id, description=description))
-        data = await self._request("POST", f"/v1/tenants/{tenant_id}/api-keys", body=body)
+        body = self._dump(
+            M.CreateApiKeyRequest(user_id=user_id, description=description)
+        )
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/api-keys", body=body
+        )
         return self._validate(M.ApiKey, data)
 
     async def list_api_keys(self, tenant_id: str) -> M.ApiKeyList:
-        data = await self._request("GET", f"/v1/tenants/{tenant_id}/api-keys", cacheable=True)
+        data = await self._request(
+            "GET", f"/v1/tenants/{tenant_id}/api-keys", cacheable=True
+        )
         return self._validate(M.ApiKeyList, data)
 
     async def revoke_api_key(self, tenant_id: str, key_id: str) -> dict[str, Any]:
-        data = await self._request("DELETE", f"/v1/tenants/{tenant_id}/api-keys/{key_id}")
+        data = await self._request(
+            "DELETE", f"/v1/tenants/{tenant_id}/api-keys/{key_id}"
+        )
         return data if isinstance(data, dict) else {}
 
 
