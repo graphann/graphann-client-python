@@ -8,13 +8,14 @@ version = "0.1.0"
 description = "Official Python SDK for the GraphANN vector database."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "GraphANN", email = "support@graphann.com" }]
 keywords = ["graphann", "vector-database", "vector-search", "embeddings", "ann"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: Other/Proprietary License",
+  "License :: OSI Approved :: Apache Software License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -33,7 +34,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://graphann.com"
 Documentation = "https://graphann.com/docs"
-Source = "https://github.com/lukaszraczylo/graphann-clients"
+Source = "https://github.com/graphann/graphann-client-python"
 Issues = "https://graphann.com/contact"
 
 [project.optional-dependencies]
