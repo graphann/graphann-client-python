@@ -4,6 +4,15 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-04-26
+
+### Changed
+
+No code changes in the Python SDK. Version bumped to maintain alignment
+with sibling SDKs (Go, Rust, TypeScript) after a cross-SDK
+naming-standardization pass. Python's existing names were already the
+canonical form, so callers see no API change.
+
 ## [0.1.1] - 2026-04-25
 
 ### Added
