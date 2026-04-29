@@ -23,6 +23,7 @@ __all__ = [
     "BulkDeleteResponse",
     "Chunk",
     "CleanupOrphansResponse",
+    "GCResponse",
     "ClusterHealth",
     "ClusterNode",
     "ClusterNodeList",
@@ -364,6 +365,14 @@ class ProcessPendingResponse(_Loose):
 class CleanupOrphansResponse(_Loose):
     removed: list[str] = Field(default_factory=list)
     freed_bytes: int = 0
+
+
+class GCResponse(_Loose):
+    """Body returned by both ``POST .../indexes/{id}/gc`` and
+    ``POST /v1/admin/gc``. Reports the count of expired documents reclaimed."""
+
+    index_id: str = ""
+    deleted_count: int = 0
 
 
 # ---------------------------------------------------------------------------

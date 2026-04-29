@@ -588,6 +588,25 @@ class Client:
         data = self._request("POST", "/v1/admin/cleanup-orphans")
         return self._validate(M.CleanupOrphansResponse, data)
 
+    def run_index_gc(self, tenant_id: str, index_id: str) -> M.GCResponse:
+        """``POST /v1/tenants/{tenantID}/indexes/{indexID}/gc``.
+
+        Sweeps every document whose sidecar ``ExpiresAt`` has passed and
+        returns the count reclaimed. Idempotent — calling twice in a row
+        returns 0 the second time.
+        """
+        data = self._request(
+            "POST",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/gc",
+        )
+        return self._validate(M.GCResponse, data)
+
+    def run_admin_gc(self) -> M.GCResponse:
+        """``POST /v1/admin/gc`` — sweep expired documents across every
+        loaded index in one shot. Admin only."""
+        data = self._request("POST", "/v1/admin/gc")
+        return self._validate(M.GCResponse, data)
+
     # ==================================================================
     # Chunks
     # ==================================================================

@@ -536,6 +536,19 @@ class AsyncClient:
         data = await self._request("POST", "/v1/admin/cleanup-orphans")
         return self._validate(M.CleanupOrphansResponse, data)
 
+    async def run_index_gc(self, tenant_id: str, index_id: str) -> M.GCResponse:
+        """``POST /v1/tenants/{tenantID}/indexes/{indexID}/gc``."""
+        data = await self._request(
+            "POST",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/gc",
+        )
+        return self._validate(M.GCResponse, data)
+
+    async def run_admin_gc(self) -> M.GCResponse:
+        """``POST /v1/admin/gc`` — admin only."""
+        data = await self._request("POST", "/v1/admin/gc")
+        return self._validate(M.GCResponse, data)
+
     # ==================================================================
     # Chunks
     # ==================================================================
