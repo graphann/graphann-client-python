@@ -228,7 +228,7 @@ def test_add_documents_validates_input(httpx_mock: HTTPXMock, url: str) -> None:
         url=f"{url}/v1/tenants/t_unit/indexes/i_1/documents",
         method="POST",
         status_code=201,
-        json={"added": 2, "index_id": "i_1", "chunk_ids": [0, 1]},
+        json={"added": 2, "index_id": "i_1", "chunk_ids": ["chunk-0", "chunk-1"]},
     )
     with make_client(url) as c:
         resp = c.add_documents(
@@ -240,7 +240,7 @@ def test_add_documents_validates_input(httpx_mock: HTTPXMock, url: str) -> None:
             ],
         )
     assert resp.added == 2
-    assert resp.chunk_ids == [0, 1]
+    assert resp.chunk_ids == ["chunk-0", "chunk-1"]
 
 
 def test_delete_index_returns_none(httpx_mock: HTTPXMock, url: str) -> None:

@@ -210,7 +210,8 @@ class DocumentInput(BaseModel):
 class AddDocumentsResponse(_Loose):
     added: int
     index_id: str
-    chunk_ids: list[int] = Field(default_factory=list)
+    # Server emits []store.ChunkID (= []string), not integers.
+    chunk_ids: list[str] = Field(default_factory=list)
 
 
 class ImportDocumentsResponse(_Loose):
@@ -359,7 +360,8 @@ class ProcessPendingResponse(_Loose):
     index_id: str
     processed: int
     chunks_created: int
-    chunk_ids: list[int] = Field(default_factory=list)
+    # Server emits []store.ChunkID (= []string), not integers.
+    chunk_ids: list[str] = Field(default_factory=list)
 
 
 class CleanupOrphansResponse(_Loose):
