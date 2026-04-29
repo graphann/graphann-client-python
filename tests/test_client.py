@@ -92,9 +92,9 @@ def test_list_tenants(httpx_mock: HTTPXMock, url: str) -> None:
     assert tenants[0].index_count == 2
 
 
-def test_search_text_sends_correct_body(httpx_mock: HTTPXMock, url: str) -> None:
+def test_search_sends_correct_body(httpx_mock: HTTPXMock, url: str) -> None:
     httpx_mock.add_response(
-        url=f"{url}/v1/tenants/t_unit/indexes/i_1/search/text",
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/search",
         method="POST",
         json={
             "results": [
@@ -105,7 +105,7 @@ def test_search_text_sends_correct_body(httpx_mock: HTTPXMock, url: str) -> None
         },
     )
     with make_client(url) as c:
-        results = c.search_text("t_unit", "i_1", "hello world", k=5)
+        results = c.search("t_unit", "i_1", query="hello world", k=5)
     assert len(results) == 2
     assert results[0].id == "c1"
     assert results[0].score == 0.9
@@ -114,6 +114,113 @@ def test_search_text_sends_correct_body(httpx_mock: HTTPXMock, url: str) -> None
     assert request is not None
     body = json.loads(request.content)
     assert body == {"query": "hello world", "k": 5}
+
+
+def test_upsert_resource_create(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/resources/res_1",
+        method="PUT",
+        json={
+            "resource_id": "res_1",
+            "chunks_added": 3,
+            "chunks_tombstoned": 0,
+            "operation": "create",
+        },
+    )
+    with make_client(url) as c:
+        resp = c.upsert_resource("t_unit", "i_1", "res_1", "hello world")
+    assert resp.resource_id == "res_1"
+    assert resp.operation == "create"
+    assert resp.chunks_added == 3
+    assert resp.chunks_tombstoned == 0
+
+
+def test_upsert_resource_update(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/resources/res_1",
+        method="PUT",
+        json={
+            "resource_id": "res_1",
+            "chunks_added": 2,
+            "chunks_tombstoned": 3,
+            "operation": "update",
+        },
+    )
+    with make_client(url) as c:
+        resp = c.upsert_resource(
+            "t_unit", "i_1", "res_1", "updated text", metadata={"source": "api"}
+        )
+    assert resp.operation == "update"
+    assert resp.chunks_tombstoned == 3
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    assert body["metadata"] == {"source": "api"}
+
+
+def test_compact_index_409_raises_conflict(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/compact",
+        method="POST",
+        status_code=409,
+        json={
+            "error": {
+                "code": "compact_in_progress",
+                "message": "Compaction already running",
+            }
+        },
+    )
+    with make_client(url) as c, pytest.raises(ConflictError) as exc_info:
+        c.compact_index("t_unit", "i_1")
+    assert exc_info.value.status_code == 409
+
+
+def test_create_index_with_compression_and_approximate(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes",
+        method="POST",
+        status_code=201,
+        json={
+            "id": "i_new",
+            "tenant_id": "t_unit",
+            "name": "pq-index",
+            "status": "empty",
+            "compression": "pq",
+            "approximate": True,
+        },
+    )
+    with make_client(url) as c:
+        idx = c.create_index("t_unit", "pq-index", compression="pq", approximate=True)
+    assert idx.compression == "pq"
+    assert idx.approximate is True
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    assert body["compression"] == "pq"
+    assert body["approximate"] is True
+
+
+def test_search_filter_equals(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/search",
+        method="POST",
+        json={"results": [], "total": 0},
+    )
+    from graphann.models import SearchFilter
+
+    with make_client(url) as c:
+        c.search(
+            "t_unit",
+            "i_1",
+            query="test",
+            filter=SearchFilter(equals={"env": "prod"}),
+        )
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    assert body["filter"] == {"equals": {"env": "prod"}}
 
 
 def test_add_documents_validates_input(httpx_mock: HTTPXMock, url: str) -> None:
@@ -143,8 +250,7 @@ def test_delete_index_returns_none(httpx_mock: HTTPXMock, url: str) -> None:
         status_code=204,
     )
     with make_client(url) as c:
-        result = c.delete_index("t_unit", "i_1")
-    assert result is None
+        c.delete_index("t_unit", "i_1")
 
 
 def test_search_requires_query_or_vector(url: str) -> None:

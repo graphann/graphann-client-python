@@ -64,6 +64,8 @@ __all__ = [
     "Tenant",
     "TenantList",
     "UpdateIndexRequest",
+    "UpsertResourceRequest",
+    "UpsertResourceResponse",
 ]
 
 
@@ -140,6 +142,10 @@ class Index(_Loose):
     dimension: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # Compression strategy configured for this index (e.g. "none", "pq").
+    compression: str | None = None
+    # Whether approximate (HNSW) search is enabled.
+    approximate: bool | None = None
 
 
 class IndexList(_Loose):
@@ -153,6 +159,10 @@ class CreateIndexRequest(BaseModel):
     name: str
     description: str | None = None
     id: str | None = None
+    # Optional compression strategy: "none", "scalar", "binary", "pq", "recompute", or "".
+    compression: str | None = None
+    # Optional: enable approximate (HNSW) search. None defers to server default.
+    approximate: bool | None = None
 
 
 class UpdateIndexRequest(BaseModel):
@@ -160,6 +170,10 @@ class UpdateIndexRequest(BaseModel):
 
     name: str | None = None
     description: str | None = None
+    # Optional compression strategy update.
+    compression: str | None = None
+    # Optional approximate-search flag update.
+    approximate: bool | None = None
 
 
 class IndexStatus(_Loose):
@@ -288,10 +302,12 @@ class SearchFilter(BaseModel):
     repo_ids: list[str] | None = None
     exclude_external_ids: list[str] | None = None
     metadata_filter: dict[str, Any] | None = None
+    # Generic metadata pre-filter: every key/value pair must match (string equality).
+    equals: dict[str, str] | None = None
 
 
 class SearchRequest(BaseModel):
-    """Body for ``POST /search`` / ``/search/text`` / ``/search/vector``."""
+    """Body for ``POST /search``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -569,3 +585,27 @@ class ApiKey(_Loose):
 class ApiKeyList(_Loose):
     keys: list[ApiKey] = Field(default_factory=list)
     total: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Resource upsert
+# ---------------------------------------------------------------------------
+
+
+class UpsertResourceRequest(BaseModel):
+    """Body for ``PUT /v1/tenants/{tid}/indexes/{iid}/resources/{resID}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    metadata: dict[str, str] | None = None
+
+
+class UpsertResourceResponse(_Loose):
+    """Response from ``PUT .../resources/{resID}``."""
+
+    resource_id: str
+    chunks_added: int
+    chunks_tombstoned: int
+    # "create" on first upsert, "update" on subsequent ones.
+    operation: str

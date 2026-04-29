@@ -4,6 +4,42 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-28
+
+### Removed (BREAKING)
+
+- `Client.search_text` / `AsyncClient.search_text` — deleted server-side
+  (`POST .../search/text` no longer exists). Use `Client.search` with the
+  `query` parameter instead.
+- `Client.search_vector` / `AsyncClient.search_vector` — deleted
+  server-side (`POST .../search/vector` no longer exists). Use
+  `Client.search` with the `vector` parameter instead.
+- `Client.build_index` / `AsyncClient.build_index` — was a stub no-op on
+  the server; endpoint removed.
+
+### Added
+
+- `Client.upsert_resource` / `AsyncClient.upsert_resource` — `PUT
+  /v1/tenants/{tenantID}/indexes/{indexID}/resources/{resourceID}`. Atomic
+  create-or-replace: parses the text, chunks it, embeds it, and swaps out
+  any prior chunks for that resource in one request. Returns
+  `UpsertResourceResponse` with `resource_id`, `chunks_added`,
+  `chunks_tombstoned`, and `operation` (`"create"` or `"update"`).
+- `UpsertResourceRequest` and `UpsertResourceResponse` Pydantic models
+  exported from `graphann.models`.
+
+### Changed
+
+- `CreateIndexRequest` and `UpdateIndexRequest` gain two optional fields:
+  `compression` (`"none" | "scalar" | "binary" | "pq" | "recompute" | ""`)
+  and `approximate` (`bool`).
+- `Index` response model gains `compression` (`str | None`) and
+  `approximate` (`bool | None`).
+- `SearchFilter` gains `equals` (`dict[str, str] | None`) for generic
+  metadata pre-filtering.
+- `compact_index` now raises `ConflictError` (HTTP 409) when a compaction
+  is already running — callers should catch and retry after a backoff.
+
 ## [0.2.0] - 2026-04-26
 
 ### Changed

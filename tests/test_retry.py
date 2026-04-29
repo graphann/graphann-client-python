@@ -51,7 +51,9 @@ def test_compute_delay_honours_retry_after() -> None:
 
 
 def test_retry_after_disabled() -> None:
-    policy = RetryPolicy(max_retries=3, backoff_base=1.0, max_delay=10.0, respect_retry_after=False)
+    policy = RetryPolicy(
+        max_retries=3, backoff_base=1.0, max_delay=10.0, respect_retry_after=False
+    )
     rng = random.Random(0)
     d = compute_delay(0, policy, retry_after=999.0, rng=rng)
     assert 0.0 <= d <= 1.0
@@ -104,7 +106,9 @@ def test_client_gives_up_after_max_retries(
     assert len(fast_sleep) == 3
 
 
-def test_client_retries_on_503(httpx_mock: HTTPXMock, url: str, fast_sleep: list[float]) -> None:
+def test_client_retries_on_503(
+    httpx_mock: HTTPXMock, url: str, fast_sleep: list[float]
+) -> None:
     httpx_mock.add_response(
         url=f"{url}/v1/tenants",
         method="GET",
@@ -140,7 +144,9 @@ def test_max_retries_zero_disables_retries(
     assert fast_sleep == []
 
 
-def test_no_retry_on_400(httpx_mock: HTTPXMock, url: str, fast_sleep: list[float]) -> None:
+def test_no_retry_on_400(
+    httpx_mock: HTTPXMock, url: str, fast_sleep: list[float]
+) -> None:
     httpx_mock.add_response(
         url=f"{url}/v1/tenants",
         method="POST",

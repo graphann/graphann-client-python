@@ -78,7 +78,9 @@ def parse_retry_after(value: str | None) -> float | None:
     return max(0.0, (target - now).total_seconds())
 
 
-DEFAULT_TIMEOUT: httpx.Timeout = httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0)
+DEFAULT_TIMEOUT: httpx.Timeout = httpx.Timeout(
+    connect=5.0, read=30.0, write=30.0, pool=5.0
+)
 DEFAULT_LIMITS: httpx.Limits = httpx.Limits(
     max_connections=20, max_keepalive_connections=10, keepalive_expiry=30.0
 )
@@ -143,7 +145,9 @@ def _encode_body(
     if isinstance(body, (bytes, bytearray)):
         encoded = bytes(body)
     else:
-        encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
     headers.setdefault("Content-Type", "application/json")
     if gzip_threshold > 0 and len(encoded) >= gzip_threshold:
         encoded = gzip.compress(encoded)

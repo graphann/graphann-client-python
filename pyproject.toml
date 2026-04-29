@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphann"
-version = "0.2.0"
+version = "0.3.0"
 description = "Official Python SDK for the GraphANN vector database."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -87,7 +87,15 @@ warn_return_any = true
 no_implicit_reexport = true
 strict_equality = true
 strict_concatenate = true
+ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["pytest_httpx", "respx", "pytest"]
+ignore_missing_imports = true
+
+[tool.isort]
+profile = "black"
+line_length = 100
 
 [tool.ruff]
 line-length = 100

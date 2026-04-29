@@ -36,17 +36,17 @@ async def test_health() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_text_round_trip() -> None:
+async def test_search_round_trip() -> None:
     payload = {
         "results": [{"id": "c1", "score": 0.5}, {"id": "c2", "score": 0.4}],
         "total": 2,
     }
     with respx.mock() as mock:
-        route = mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search/text").mock(
+        route = mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search").mock(
             return_value=httpx.Response(200, json=payload)
         )
         async with make_client() as c:
-            results = await c.search_text("t_unit", "i_1", "hello")
+            results = await c.search("t_unit", "i_1", query="hello")
     assert [r.id for r in results] == ["c1", "c2"]
     body = route.calls.last.request.content
     import json
@@ -99,13 +99,13 @@ async def test_async_singleflight() -> None:
         return httpx.Response(200, json={"results": [], "total": 0})
 
     with respx.mock() as mock:
-        mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search/text").mock(
+        mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search").mock(
             side_effect=respond
         )
 
         async with make_client() as c:
             tasks = [
-                asyncio.create_task(c.search_text("t_unit", "i_1", "hello"))
+                asyncio.create_task(c.search("t_unit", "i_1", query="hello"))
                 for _ in range(3)
             ]
             # Yield control so all three tasks run their request setup
@@ -248,6 +248,50 @@ async def test_async_delete_llm_settings_uses_canonical_path() -> None:
         async with make_client() as c:
             resp = await c.delete_llm_settings("org_1")
     assert resp == {"provider": "ollama"}
+
+
+@pytest.mark.asyncio
+async def test_async_upsert_resource_create() -> None:
+    payload = {
+        "resource_id": "doc-1",
+        "chunks_added": 3,
+        "chunks_tombstoned": 0,
+        "operation": "create",
+    }
+    with respx.mock() as mock:
+        route = mock.put(f"{URL}/v1/tenants/t_unit/indexes/i_1/resources/doc-1").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with make_client() as c:
+            resp = await c.upsert_resource(
+                "t_unit", "i_1", "doc-1", "hello world", metadata={"src": "test"}
+            )
+    assert resp.resource_id == "doc-1"
+    assert resp.chunks_added == 3
+    assert resp.chunks_tombstoned == 0
+    assert resp.operation == "create"
+    import json
+
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"text": "hello world", "metadata": {"src": "test"}}
+
+
+@pytest.mark.asyncio
+async def test_async_upsert_resource_update() -> None:
+    payload = {
+        "resource_id": "doc-1",
+        "chunks_added": 2,
+        "chunks_tombstoned": 3,
+        "operation": "update",
+    }
+    with respx.mock() as mock:
+        mock.put(f"{URL}/v1/tenants/t_unit/indexes/i_1/resources/doc-1").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with make_client() as c:
+            resp = await c.upsert_resource("t_unit", "i_1", "doc-1", "updated text")
+    assert resp.operation == "update"
+    assert resp.chunks_tombstoned == 3
 
 
 @pytest.mark.asyncio

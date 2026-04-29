@@ -324,9 +324,17 @@ class AsyncClient:
         *,
         description: str | None = None,
         id: str | None = None,
+        compression: str | None = None,
+        approximate: bool | None = None,
     ) -> M.Index:
         body = self._dump(
-            M.CreateIndexRequest(name=name, description=description, id=id)
+            M.CreateIndexRequest(
+                name=name,
+                description=description,
+                id=id,
+                compression=compression,
+                approximate=approximate,
+            )
         )
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes", body=body
@@ -347,8 +355,17 @@ class AsyncClient:
         *,
         name: str | None = None,
         description: str | None = None,
+        compression: str | None = None,
+        approximate: bool | None = None,
     ) -> M.Index:
-        body = self._dump(M.UpdateIndexRequest(name=name, description=description))
+        body = self._dump(
+            M.UpdateIndexRequest(
+                name=name,
+                description=description,
+                compression=compression,
+                approximate=approximate,
+            )
+        )
         data = await self._request(
             "PATCH", f"/v1/tenants/{tenant_id}/indexes/{index_id}", body=body
         )
@@ -371,13 +388,12 @@ class AsyncClient:
         )
         return self._validate(M.LiveIndexStats, data)
 
-    async def build_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
-        data = await self._request(
-            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/build"
-        )
-        return data if isinstance(data, dict) else {}
-
     async def compact_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
+        """``POST .../compact``.
+
+        Raises :class:`graphann.errors.ConflictError` (HTTP 409) when a
+        compaction is already in flight — treat as retryable.
+        """
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/compact"
         )
@@ -583,47 +599,28 @@ class AsyncClient:
         )
         return self._validate(M.SearchResponse, data).results
 
-    async def search_text(
+    async def upsert_resource(
         self,
         tenant_id: str,
         index_id: str,
-        query: str,
+        resource_id: str,
+        text: str,
         *,
-        k: int | None = 10,
-        filter: M.SearchFilter | dict[str, Any] | None = None,
-        coalesce: bool = True,
-        cache: bool = True,
-    ) -> list[M.SearchResult]:
-        body = M.SearchRequest(query=query, k=k, filter=_coerce_filter(filter))
-        data = await self._request(
-            "POST",
-            f"/v1/tenants/{tenant_id}/indexes/{index_id}/search/text",
-            body=self._dump(body),
-            cacheable=cache,
-            coalesce=coalesce,
-        )
-        return self._validate(M.SearchResponse, data).results
+        metadata: dict[str, str] | None = None,
+    ) -> M.UpsertResourceResponse:
+        """``PUT /v1/tenants/{tid}/indexes/{iid}/resources/{resID}``.
 
-    async def search_vector(
-        self,
-        tenant_id: str,
-        index_id: str,
-        vector: list[float],
-        *,
-        k: int | None = 10,
-        filter: M.SearchFilter | dict[str, Any] | None = None,
-        coalesce: bool = True,
-        cache: bool = True,
-    ) -> list[M.SearchResult]:
-        body = M.SearchRequest(vector=vector, k=k, filter=_coerce_filter(filter))
+        Atomically creates or replaces all chunks for ``resource_id``.
+        Returns operation="create" on first upsert, "update" on subsequent ones.
+        """
+        body = self._dump(M.UpsertResourceRequest(text=text, metadata=metadata))
         data = await self._request(
-            "POST",
-            f"/v1/tenants/{tenant_id}/indexes/{index_id}/search/vector",
-            body=self._dump(body),
-            cacheable=cache,
-            coalesce=coalesce,
+            "PUT",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/resources/{resource_id}",
+            body=body,
         )
-        return self._validate(M.SearchResponse, data).results
+        self._invalidate_search_cache()
+        return self._validate(M.UpsertResourceResponse, data)
 
     # ------------------------------------------------------------------
     # Org-level
