@@ -532,8 +532,24 @@ class AsyncClient:
         self._invalidate_search_cache()
         return self._validate(M.BulkDeleteByExternalIdsResponse, data)
 
-    async def cleanup_orphans(self) -> M.CleanupOrphansResponse:
-        data = await self._request("POST", "/v1/admin/cleanup-orphans")
+    async def cleanup_orphans(
+        self,
+        min_age: str = "",
+        dry_run: bool = False,
+    ) -> M.CleanupOrphansResponse:
+        """``POST /v1/admin/cleanup-orphans`` — admin only.
+
+        See :meth:`graphann.client.Client.cleanup_orphans` for parameter
+        semantics — both clients share the same wire contract.
+        """
+        params: dict[str, str] = {}
+        if min_age:
+            params["min_age"] = min_age
+        if dry_run:
+            params["dry_run"] = "true"
+        data = await self._request(
+            "POST", "/v1/admin/cleanup-orphans", params=params or None
+        )
         return self._validate(M.CleanupOrphansResponse, data)
 
     async def run_index_gc(self, tenant_id: str, index_id: str) -> M.GCResponse:

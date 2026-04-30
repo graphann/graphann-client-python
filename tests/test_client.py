@@ -596,3 +596,52 @@ def test_delete_llm_settings_uses_canonical_path(
     with make_client(url) as c:
         resp = c.delete_llm_settings("org_1")
     assert resp == {"provider": "ollama", "model": "llama3.2:3b"}
+
+
+def test_cleanup_orphans_default(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/admin/cleanup-orphans",
+        method="POST",
+        json={
+            "removed": ["/data/tenants/t/indexes/i.compact"],
+            "freed_bytes": 4096,
+            "min_age": "1h0m0s",
+            "dry_run": False,
+        },
+    )
+    with make_client(url) as c:
+        resp = c.cleanup_orphans()
+    assert resp.freed_bytes == 4096
+    assert resp.removed == ["/data/tenants/t/indexes/i.compact"]
+    assert resp.min_age == "1h0m0s"
+    assert resp.dry_run is False
+    # No params sent on the default call.
+    sent = httpx_mock.get_request()
+    assert sent is not None
+    assert sent.url.params.get("min_age") is None
+    assert sent.url.params.get("dry_run") is None
+
+
+def test_cleanup_orphans_passes_min_age_and_dry_run(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/admin/cleanup-orphans?min_age=24h&dry_run=true",
+        method="POST",
+        json={
+            "removed": ["/data/tenants/t/indexes/i.pre-reembed.20260101T000000Z"],
+            "freed_bytes": 0,
+            "min_age": "24h0m0s",
+            "dry_run": True,
+        },
+    )
+    with make_client(url) as c:
+        resp = c.cleanup_orphans(min_age="24h", dry_run=True)
+    assert resp.dry_run is True
+    assert resp.min_age == "24h0m0s"
+    assert len(resp.removed) == 1
+
+    sent = httpx_mock.get_request()
+    assert sent is not None
+    assert sent.url.params.get("min_age") == "24h"
+    assert sent.url.params.get("dry_run") == "true"

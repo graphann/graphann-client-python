@@ -4,6 +4,20 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `Client.cleanup_orphans` / `AsyncClient.cleanup_orphans` accept new
+  optional keyword arguments: `min_age: str = ""` (Go duration string,
+  e.g. `"1h"`, `"24h"`, `"30m"`; empty uses server default of 1h) and
+  `dry_run: bool = False` (preview mode — server enumerates without
+  removing). Pre-existing call sites that pass no arguments are
+  unaffected.
+- `CleanupOrphansResponse` gains `min_age: str` and `dry_run: bool`
+  fields echoing what the server applied. Both default to empty/false
+  when the server omits them (older servers).
+
 ## [0.3.0] - 2026-04-28
 
 ### Removed (BREAKING)

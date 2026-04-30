@@ -317,3 +317,30 @@ async def test_async_create_index_round_trip() -> None:
             idx = await c.create_index("t_unit", "demo")
     assert idx.id == "i_1"
     assert idx.status == "empty"
+
+
+@pytest.mark.asyncio
+async def test_async_cleanup_orphans_passes_min_age_and_dry_run() -> None:
+    with respx.mock() as mock:
+        route = mock.post(f"{URL}/v1/admin/cleanup-orphans").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "removed": [
+                        "/data/tenants/t/indexes/i.pre-reembed.20260101T000000Z"
+                    ],
+                    "freed_bytes": 0,
+                    "min_age": "24h0m0s",
+                    "dry_run": True,
+                },
+            )
+        )
+        async with make_client() as c:
+            resp = await c.cleanup_orphans(min_age="24h", dry_run=True)
+    assert resp.dry_run is True
+    assert resp.min_age == "24h0m0s"
+    assert len(resp.removed) == 1
+
+    sent = route.calls[0].request
+    assert sent.url.params.get("min_age") == "24h"
+    assert sent.url.params.get("dry_run") == "true"

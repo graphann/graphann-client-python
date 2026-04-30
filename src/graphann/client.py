@@ -583,9 +583,32 @@ class Client:
         self._invalidate_search_cache()
         return self._validate(M.BulkDeleteByExternalIdsResponse, data)
 
-    def cleanup_orphans(self) -> M.CleanupOrphansResponse:
-        """``POST /v1/admin/cleanup-orphans`` — admin only."""
-        data = self._request("POST", "/v1/admin/cleanup-orphans")
+    def cleanup_orphans(
+        self,
+        min_age: str = "",
+        dry_run: bool = False,
+    ) -> M.CleanupOrphansResponse:
+        """``POST /v1/admin/cleanup-orphans`` — admin only.
+
+        Sweeps stale compaction artifacts (``*.old`` / ``*.compact`` /
+        ``*.backup`` / ``*.failed``) and pre-reembed snapshots
+        (``*.pre-reembed.<timestamp>``) from every tenant's data tree.
+
+        :param min_age: Go-style duration string controlling the
+            minimum age before an artifact is eligible for removal
+            (e.g. ``"1h"``, ``"24h"``, ``"30m"``). Empty string ``""``
+            uses the server default (1h). The server enforces a
+            5-minute floor — passing a smaller positive value yields
+            HTTP 400.
+        :param dry_run: When ``True``, the server enumerates what
+            *would* have been removed without touching disk.
+        """
+        params: dict[str, str] = {}
+        if min_age:
+            params["min_age"] = min_age
+        if dry_run:
+            params["dry_run"] = "true"
+        data = self._request("POST", "/v1/admin/cleanup-orphans", params=params or None)
         return self._validate(M.CleanupOrphansResponse, data)
 
     def run_index_gc(self, tenant_id: str, index_id: str) -> M.GCResponse:

@@ -365,8 +365,18 @@ class ProcessPendingResponse(_Loose):
 
 
 class CleanupOrphansResponse(_Loose):
+    """Body returned by ``POST /v1/admin/cleanup-orphans``.
+
+    ``min_age`` is a Go-style duration string echoing the cutoff the
+    server actually applied (e.g. ``"1h0m0s"``, ``"24h0m0s"``).
+    ``dry_run`` echoes the dry-run flag — when ``True``, ``removed`` is
+    what would have been deleted, not what was deleted.
+    """
+
     removed: list[str] = Field(default_factory=list)
     freed_bytes: int = 0
+    min_age: str = ""
+    dry_run: bool = False
 
 
 class GCResponse(_Loose):
