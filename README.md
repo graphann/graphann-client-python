@@ -49,8 +49,23 @@ with Client(
     )
 
     # Search
-    for hit in client.search_text("t_abc", index.id, "vector database", k=5):
+    for hit in client.search("t_abc", index.id, query="vector database", k=5):
         print(hit.id, hit.score)
+
+    # Optional cross-encoder reranking (no-op against servers without
+    # --reranker-url configured)
+    for hit in client.search(
+        "t_abc",
+        index.id,
+        query="what does the standard say about audit trails?",
+        k=10,
+        rerank=True,        # opt-in per query
+        candidate_k=50,     # HNSW pool fed to reranker (default max(4*k, 50))
+    ):
+        # hit.score is always the cosine similarity. hit.rerank_score
+        # is non-None only when the server actually reranked this hit
+        # — and when set, it drives the ordering.
+        print(hit.id, hit.score, hit.rerank_score)
 ```
 
 ## Asynchronous usage
@@ -61,7 +76,7 @@ from graphann import AsyncClient
 
 async def main() -> None:
     async with AsyncClient(api_key="sk_live_...", tenant_id="t_abc") as client:
-        results = await client.search_text("t_abc", "i_xyz", "hello")
+        results = await client.search("t_abc", "i_xyz", query="hello")
         for r in results:
             print(r.id, r.score)
 
@@ -87,7 +102,7 @@ from graphann.errors import (
 )
 
 try:
-    client.search_text("t_abc", "i_missing", "hello")
+    client.search("t_abc", "i_missing", query="hello")
 except NotFoundError:
     print("index missing")
 except RateLimitError as exc:

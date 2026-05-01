@@ -611,13 +611,30 @@ class AsyncClient:
         vector: list[float] | None = None,
         k: int | None = 10,
         filter: M.SearchFilter | dict[str, Any] | None = None,
+        rerank: bool | None = None,
+        candidate_k: int | None = None,
+        rerank_k: int | None = None,
         coalesce: bool = True,
         cache: bool = True,
     ) -> list[M.SearchResult]:
+        """Hybrid search. Pass either ``query`` (text) or ``vector``.
+
+        When ``rerank=True`` and the server has a reranker configured,
+        the top-``candidate_k`` HNSW candidates are rescored with the
+        cross-encoder. ``candidate_k`` defaults to ``max(4*k, 50)``;
+        the server clamps to ``[k, 1000]``. ``rerank_k`` defaults to
+        ``k``. Vector-only requests ignore ``rerank``.
+        """
         if query is None and vector is None:
             raise ValueError("search requires either query or vector")
         body = M.SearchRequest(
-            query=query, vector=vector, k=k, filter=_coerce_filter(filter)
+            query=query,
+            vector=vector,
+            k=k,
+            filter=_coerce_filter(filter),
+            rerank=rerank,
+            candidate_k=candidate_k,
+            rerank_k=rerank_k,
         )
         data = await self._request(
             "POST",

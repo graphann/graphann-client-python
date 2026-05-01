@@ -309,7 +309,12 @@ class SearchFilter(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    """Body for ``POST /search``."""
+    """Body for ``POST /search``.
+
+    The ``rerank``/``candidate_k``/``rerank_k`` fields opt in to
+    cross-encoder reranking when the server has a reranker configured
+    (via ``--reranker-url``). Silently no-ops on servers without one.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -318,11 +323,30 @@ class SearchRequest(BaseModel):
     k: int | None = None
     filter: SearchFilter | None = None
 
+    # Cross-encoder reranker controls. Effective only when the server has
+    # a reranker configured AND ``rerank`` is True. Vector-only requests
+    # ignore ``rerank`` (no text query to feed the cross-encoder).
+    rerank: bool | None = None
+    candidate_k: int | None = None  # default max(4*k, 50); server clamps to [k, 1000]
+    rerank_k: int | None = None  # default = k
+
 
 class SearchResult(_Loose):
+    """One hit in a search response.
+
+    ``score`` is always the first-stage cosine similarity (higher is
+    better). ``rerank_score`` is populated only when the server
+    actually applied the cross-encoder reranker — it carries the
+    reranker's native relevance score (different scale from cosine,
+    typically -10..10 for bge-reranker-v2-m3). When ``rerank_score``
+    is set, the result ordering reflects it; when ``None``, ordering
+    is by ``score``.
+    """
+
     id: str
     text: str | None = None
     score: float = 0.0
+    rerank_score: float | None = None
     metadata: Any = None
 
 

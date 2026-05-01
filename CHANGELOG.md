@@ -4,6 +4,32 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-01
+
+### Added
+
+- `SearchRequest.rerank`, `SearchRequest.candidate_k`, `SearchRequest.rerank_k`
+  fields wire the optional cross-encoder reranker. `Client.search` /
+  `AsyncClient.search` accept matching `rerank`, `candidate_k`, and
+  `rerank_k` keyword arguments. When the server has a reranker
+  configured (via `--reranker-url`), set `rerank=True` to rescore the
+  top-`candidate_k` HNSW candidates and return the top-`rerank_k`
+  (or top-`k`). Defaults: `candidate_k = max(4*k, 50)` (server clamps
+  to `[k, 1000]`), `rerank_k = k`. No-op against non-rerank-aware
+  servers — safe to roll out unconditionally.
+- `SearchResult.rerank_score: float | None` — populated only when the
+  server actually applied the reranker. Carries the cross-encoder's
+  native relevance score (different scale from cosine, typically
+  -10..10 for bge-reranker-v2-m3). When non-`None` it also reflects
+  the result ordering; when `None`, ordering is by `score` (cosine).
+
+### Unchanged
+
+- `SearchResult.score` is still always the first-stage cosine
+  similarity, regardless of rerank state. Existing client code that
+  only reads `score` keeps working — even when accidentally hitting a
+  rerank-enabled endpoint.
+
 ## [0.5.0] - 2026-04-30
 
 ### Changed
