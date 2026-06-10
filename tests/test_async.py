@@ -320,6 +320,92 @@ async def test_async_create_index_round_trip() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_add_documents_vectors_and_bulk_flags() -> None:
+    import json
+
+    with respx.mock() as mock:
+        route = mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/documents").mock(
+            return_value=httpx.Response(
+                201,
+                json={
+                    "added": 1,
+                    "index_id": "i_1",
+                    "chunk_ids": ["c-0"],
+                    "external_ids": ["minted-1"],
+                },
+            )
+        )
+        async with make_client() as c:
+            resp = await c.add_documents(
+                "t_unit",
+                "i_1",
+                [{"text": "alpha", "vector": [0.1, 0.2]}],
+                defer_save=True,
+                bulk=True,
+            )
+    assert resp.added == 1
+    assert resp.external_ids == ["minted-1"]
+    body = json.loads(route.calls.last.request.content)
+    assert body["documents"][0]["vector"] == [0.1, 0.2]
+    assert body["defer_save"] is True
+    assert body["bulk"] is True
+
+
+@pytest.mark.asyncio
+async def test_async_flush_index_sends_json_content_type() -> None:
+    with respx.mock() as mock:
+        route = mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/flush").mock(
+            return_value=httpx.Response(200, json={"flushed": True})
+        )
+        async with make_client() as c:
+            resp = await c.flush_index("t_unit", "i_1")
+    assert resp.flushed is True
+    sent = route.calls.last.request
+    assert sent.headers["Content-Type"] == "application/json"
+    assert sent.content == b"{}"
+
+
+@pytest.mark.asyncio
+async def test_async_rebuild_graph_round_trip() -> None:
+    with respx.mock() as mock:
+        mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/rebuild-graph").mock(
+            return_value=httpx.Response(
+                200, json={"rebuilt": True, "chunks": 100, "wall_ms": 5}
+            )
+        )
+        async with make_client() as c:
+            resp = await c.rebuild_graph("t_unit", "i_1")
+    assert resp.rebuilt is True
+    assert resp.chunks == 100
+    assert resp.wall_ms == 5
+
+
+@pytest.mark.asyncio
+async def test_async_search_full_sharded_fields_and_ef_search() -> None:
+    import json
+
+    payload = {
+        "results": [{"id": "c1", "score": 0.7}],
+        "total": 1,
+        "partial": False,
+        "shards_total": 2,
+        "shards_ok": 2,
+    }
+    with respx.mock() as mock:
+        route = mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with make_client() as c:
+            resp = await c.search_full("t_unit", "i_1", query="hello", ef_search=128)
+    assert resp.partial is False
+    assert resp.shards_total == 2
+    assert resp.shards_ok == 2
+    assert resp.degraded_shards is None  # present only when non-empty
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"query": "hello", "k": 10, "ef_search": 128}
+
+
+@pytest.mark.asyncio
 async def test_async_cleanup_orphans_passes_min_age_and_dry_run() -> None:
     with respx.mock() as mock:
         route = mock.post(f"{URL}/v1/admin/cleanup-orphans").mock(

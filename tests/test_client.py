@@ -622,6 +622,204 @@ def test_cleanup_orphans_default(httpx_mock: HTTPXMock, url: str) -> None:
     assert sent.url.params.get("dry_run") is None
 
 
+def test_add_documents_with_precomputed_vectors(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/documents",
+        method="POST",
+        status_code=201,
+        json={"added": 2, "index_id": "i_1", "chunk_ids": ["c-0", "c-1"]},
+    )
+    with make_client(url) as c:
+        resp = c.add_documents(
+            "t_unit",
+            "i_1",
+            [
+                {"id": "a", "text": "alpha", "vector": [0.1, 0.2]},
+                {"id": "b", "text": "beta", "vector": [0.3, 0.4]},
+            ],
+        )
+    assert resp.added == 2
+    assert resp.external_ids is None  # server did not mint any
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    assert body["documents"][0]["vector"] == [0.1, 0.2]
+    assert body["documents"][1]["vector"] == [0.3, 0.4]
+    # No bulk-load flags unless explicitly requested.
+    assert "defer_save" not in body
+    assert "bulk" not in body
+
+
+def test_add_documents_passes_defer_save_and_bulk(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/documents",
+        method="POST",
+        status_code=201,
+        json={"added": 1, "index_id": "i_1", "chunk_ids": ["c-0"]},
+    )
+    with make_client(url) as c:
+        c.add_documents(
+            "t_unit",
+            "i_1",
+            [{"id": "a", "text": "alpha"}],
+            defer_save=True,
+            bulk=True,
+        )
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    assert body["defer_save"] is True
+    assert body["bulk"] is True
+
+
+def test_add_documents_parses_minted_external_ids(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/documents",
+        method="POST",
+        status_code=201,
+        json={
+            "added": 2,
+            "index_id": "i_1",
+            "chunk_ids": ["c-0", "c-1"],
+            "external_ids": ["minted-1", "client-supplied"],
+        },
+    )
+    with make_client(url) as c:
+        resp = c.add_documents(
+            "t_unit",
+            "i_1",
+            [{"text": "no id"}, {"id": "client-supplied", "text": "has id"}],
+        )
+    # Positionally aligned with the request array.
+    assert resp.external_ids == ["minted-1", "client-supplied"]
+
+
+def test_flush_index_sends_json_content_type(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/flush",
+        method="POST",
+        json={"flushed": True},
+    )
+    with make_client(url) as c:
+        resp = c.flush_index("t_unit", "i_1")
+    assert resp.flushed is True
+    req = httpx_mock.get_request()
+    assert req is not None
+    # The server's ContentTypeMiddleware rejects body-less POSTs without
+    # the JSON content type; the SDK sends ``{}`` to satisfy it.
+    assert req.headers["Content-Type"] == "application/json"
+    assert req.content == b"{}"
+
+
+def test_compact_index_sends_json_content_type(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/compact",
+        method="POST",
+        json={
+            "index_id": "i_1",
+            "status": "compacting",
+            "message": "Index compaction started",
+        },
+    )
+    with make_client(url) as c:
+        resp = c.compact_index("t_unit", "i_1")
+    assert resp["status"] == "compacting"
+    req = httpx_mock.get_request()
+    assert req is not None
+    assert req.headers["Content-Type"] == "application/json"
+    assert req.content == b"{}"
+
+
+def test_rebuild_graph_round_trip(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/rebuild-graph",
+        method="POST",
+        json={"rebuilt": True, "chunks": 52000, "wall_ms": 1234},
+    )
+    with make_client(url) as c:
+        resp = c.rebuild_graph("t_unit", "i_1")
+    assert resp.rebuilt is True
+    assert resp.chunks == 52000
+    assert resp.wall_ms == 1234
+
+
+def test_rebuild_graph_409_raises_conflict(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/rebuild-graph",
+        method="POST",
+        status_code=409,
+        json={
+            "error": {
+                "code": "conflict",
+                "message": "compaction already in progress for this index",
+            }
+        },
+    )
+    with make_client(url) as c, pytest.raises(ConflictError) as exc_info:
+        c.rebuild_graph("t_unit", "i_1")
+    assert exc_info.value.status_code == 409
+
+
+def test_search_passes_ef_search(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/search",
+        method="POST",
+        json={"results": [], "total": 0},
+    )
+    with make_client(url) as c:
+        c.search("t_unit", "i_1", query="hello", k=5, ef_search=256)
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    assert body == {"query": "hello", "k": 5, "ef_search": 256}
+
+
+def test_search_full_parses_sharded_fields(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/search",
+        method="POST",
+        json={
+            "results": [{"id": "c1", "score": 0.9}],
+            "total": 1,
+            "partial": True,
+            "shards_total": 3,
+            "shards_ok": 2,
+            "degraded_shards": ["shard-2"],
+        },
+    )
+    with make_client(url) as c:
+        resp = c.search_full("t_unit", "i_1", query="hello")
+    assert resp.total == 1
+    assert resp.results[0].id == "c1"
+    assert resp.partial is True
+    assert resp.shards_total == 3
+    assert resp.shards_ok == 2
+    assert resp.degraded_shards == ["shard-2"]
+
+
+def test_search_full_local_path_leaves_shard_fields_none(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    # Non-sharded deployments return exactly {"results", "total"}.
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/indexes/i_1/search",
+        method="POST",
+        json={"results": [], "total": 0},
+    )
+    with make_client(url) as c:
+        resp = c.search_full("t_unit", "i_1", query="hello")
+    assert resp.partial is None
+    assert resp.shards_total is None
+    assert resp.shards_ok is None
+    assert resp.degraded_shards is None
+
+
 def test_cleanup_orphans_passes_min_age_and_dry_run(
     httpx_mock: HTTPXMock, url: str
 ) -> None:

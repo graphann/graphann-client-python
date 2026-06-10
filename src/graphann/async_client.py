@@ -358,6 +358,12 @@ class AsyncClient:
         compression: str | None = None,
         approximate: bool | None = None,
     ) -> M.Index:
+        """``PATCH .../indexes/{indexID}`` — partial merge.
+
+        See :meth:`graphann.client.Client.update_index` for the
+        ``compression`` semantics (metadata-only persist; applied at the
+        next compaction).
+        """
         body = self._dump(
             M.UpdateIndexRequest(
                 name=name,
@@ -391,13 +397,42 @@ class AsyncClient:
     async def compact_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
         """``POST .../compact``.
 
-        Raises :class:`graphann.errors.ConflictError` (HTTP 409) when a
+        Compaction runs asynchronously server-side; the 200 ack carries
+        ``{"index_id", "status": "compacting", "message"}``. Raises
+        :class:`graphann.errors.ConflictError` (HTTP 409) when a
         compaction is already in flight — treat as retryable.
         """
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/compact"
         )
         return data if isinstance(data, dict) else {}
+
+    async def flush_index(self, tenant_id: str, index_id: str) -> M.FlushResponse:
+        """``POST .../flush`` — persist the live index's in-memory delta.
+
+        See :meth:`graphann.client.Client.flush_index` — pairs with the
+        ``defer_save`` / ``bulk`` ingest options.
+        """
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/flush"
+        )
+        self._invalidate_search_cache()
+        return self._validate(M.FlushResponse, data)
+
+    async def rebuild_graph(
+        self, tenant_id: str, index_id: str
+    ) -> M.RebuildGraphResponse:
+        """``POST .../rebuild-graph`` — in-place delta-HNSW rebuild.
+
+        See :meth:`graphann.client.Client.rebuild_graph`. Raises
+        :class:`graphann.errors.ConflictError` (HTTP 409) while a
+        compaction is in progress.
+        """
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/rebuild-graph"
+        )
+        self._invalidate_search_cache()
+        return self._validate(M.RebuildGraphResponse, data)
 
     async def clear_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
         data = await self._request(
@@ -415,8 +450,21 @@ class AsyncClient:
         tenant_id: str,
         index_id: str,
         documents: Iterable[M.DocumentInput | dict[str, Any]],
+        *,
+        defer_save: bool | None = None,
+        bulk: bool | None = None,
     ) -> M.AddDocumentsResponse:
-        payload = {"documents": self._document_payload(documents)}
+        """``POST .../documents``.
+
+        See :meth:`graphann.client.Client.add_documents` for the
+        precomputed-vector rules and the ``defer_save`` / ``bulk``
+        semantics (persist deferred batches with :meth:`flush_index`).
+        """
+        payload: dict[str, Any] = {"documents": self._document_payload(documents)}
+        if defer_save is not None:
+            payload["defer_save"] = defer_save
+        if bulk is not None:
+            payload["bulk"] = bulk
         data = await self._request(
             "POST",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents",
@@ -614,6 +662,7 @@ class AsyncClient:
         rerank: bool | None = None,
         candidate_k: int | None = None,
         rerank_k: int | None = None,
+        ef_search: int | None = None,
         coalesce: bool = True,
         cache: bool = True,
     ) -> list[M.SearchResult]:
@@ -623,7 +672,49 @@ class AsyncClient:
         the top-``candidate_k`` HNSW candidates are rescored with the
         cross-encoder. ``candidate_k`` defaults to ``max(4*k, 50)``;
         the server clamps to ``[k, 1000]``. ``rerank_k`` defaults to
-        ``k``. Vector-only requests ignore ``rerank``.
+        ``k``. Vector-only requests ignore ``rerank``. ``ef_search``
+        overrides the server's default HNSW beam width for this query
+        (clamped, never rejected). Use :meth:`search_full` to also
+        receive the response envelope.
+        """
+        resp = await self.search_full(
+            tenant_id,
+            index_id,
+            query=query,
+            vector=vector,
+            k=k,
+            filter=filter,
+            rerank=rerank,
+            candidate_k=candidate_k,
+            rerank_k=rerank_k,
+            ef_search=ef_search,
+            coalesce=coalesce,
+            cache=cache,
+        )
+        return resp.results
+
+    async def search_full(
+        self,
+        tenant_id: str,
+        index_id: str,
+        *,
+        query: str | None = None,
+        vector: list[float] | None = None,
+        k: int | None = 10,
+        filter: M.SearchFilter | dict[str, Any] | None = None,
+        rerank: bool | None = None,
+        candidate_k: int | None = None,
+        rerank_k: int | None = None,
+        ef_search: int | None = None,
+        coalesce: bool = True,
+        cache: bool = True,
+    ) -> M.SearchResponse:
+        """Like :meth:`search` but returns the full response envelope.
+
+        See :meth:`graphann.client.Client.search_full` — on sharded
+        cluster deployments the envelope carries ``partial`` /
+        ``shards_total`` / ``shards_ok`` / ``degraded_shards``; they
+        stay ``None`` everywhere else.
         """
         if query is None and vector is None:
             raise ValueError("search requires either query or vector")
@@ -635,6 +726,7 @@ class AsyncClient:
             rerank=rerank,
             candidate_k=candidate_k,
             rerank_k=rerank_k,
+            ef_search=ef_search,
         )
         data = await self._request(
             "POST",
@@ -643,7 +735,7 @@ class AsyncClient:
             cacheable=cache,
             coalesce=coalesce,
         )
-        return self._validate(M.SearchResponse, data).results
+        return self._validate(M.SearchResponse, data)
 
     async def upsert_resource(
         self,

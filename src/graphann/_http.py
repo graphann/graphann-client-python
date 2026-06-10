@@ -86,6 +86,12 @@ DEFAULT_LIMITS: httpx.Limits = httpx.Limits(
 )
 DEFAULT_GZIP_THRESHOLD: int = 64 * 1024  # 64 KiB
 
+# Verbs the server's ContentTypeMiddleware gates on ``Content-Type:
+# application/json`` — even when the endpoint reads no body (compact,
+# flush, gc, cleanup-orphans, ...). DELETE is only gated when a body is
+# actually sent, which ``_encode_body`` already handles.
+_MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH"})
+
 
 def build_user_agent(version: str = __version__) -> str:
     """Return the ``User-Agent`` string used by both clients."""
@@ -190,6 +196,12 @@ def build_request(
             headers[k] = v
 
     encoded = _encode_body(body, gzip_threshold=gzip_threshold, headers=headers)
+    if encoded is None and method.upper() in _MUTATING_METHODS:
+        # Body-less mutating requests still need the JSON content type or
+        # the server rejects them with 400; send an empty object so the
+        # header is always present.
+        encoded = b"{}"
+        headers.setdefault("Content-Type", "application/json")
 
     # Strip empty params so ``?prefix=&cursor=`` does not turn into noise.
     cleaned_params: dict[str, Any] = {}

@@ -23,7 +23,6 @@ __all__ = [
     "BulkDeleteResponse",
     "Chunk",
     "CleanupOrphansResponse",
-    "GCResponse",
     "ClusterHealth",
     "ClusterNode",
     "ClusterNodeList",
@@ -37,6 +36,8 @@ __all__ = [
     "DocumentInput",
     "DocumentListEntry",
     "DocumentListPage",
+    "FlushResponse",
+    "GCResponse",
     "Health",
     "HotModelSwitchRequest",
     "HotModelSwitchResponse",
@@ -59,6 +60,7 @@ __all__ = [
     "OrgSyncResponse",
     "PendingStatus",
     "ProcessPendingResponse",
+    "RebuildGraphResponse",
     "SearchRequest",
     "SearchResponse",
     "SearchResult",
@@ -205,6 +207,12 @@ class DocumentInput(BaseModel):
     repo_id: str | None = None
     file_path: str | None = None
     commit_sha: str | None = None
+    # Precomputed embedding vector. When EVERY document in a batch carries
+    # a vector the server skips embedding entirely (precomputed-ingest
+    # path); a MIXED batch — some with, some without — is rejected with
+    # HTTP 400. Vector length must match the index dimension once it is
+    # set (a fresh index accepts any length; first ingest fixes it).
+    vector: list[float] | None = None
 
 
 class AddDocumentsResponse(_Loose):
@@ -212,6 +220,13 @@ class AddDocumentsResponse(_Loose):
     index_id: str
     # Server emits []store.ChunkID (= []string), not integers.
     chunk_ids: list[str] = Field(default_factory=list)
+    # Present only when the server minted at least one external ID
+    # (sharded ingest of id-less documents — the external ID is the shard
+    # routing key). One entry per submitted document, positionally aligned
+    # with the request array; persist these as the durable document IDs.
+    # ``None`` on unsharded deployments and when every document supplied
+    # its own ``id``.
+    external_ids: list[str] | None = None
 
 
 class ImportDocumentsResponse(_Loose):
@@ -330,6 +345,12 @@ class SearchRequest(BaseModel):
     candidate_k: int | None = None  # default max(4*k, 50); server clamps to [k, 1000]
     rerank_k: int | None = None  # default = k
 
+    # Per-query HNSW beam width. 0 / omitted = server default (the
+    # ``--search-ef`` flag, default 64). The server clamps rather than
+    # rejects: negative values fall back to the default, values above
+    # 2000 are capped. Binary / PQ flat-scan modes ignore it entirely.
+    ef_search: int | None = None
+
 
 class SearchResult(_Loose):
     """One hit in a search response.
@@ -351,8 +372,25 @@ class SearchResult(_Loose):
 
 
 class SearchResponse(_Loose):
+    """Search response envelope.
+
+    The ``partial`` / ``shards_total`` / ``shards_ok`` /
+    ``degraded_shards`` fields are emitted only on the sharded
+    scatter-gather path (cluster deployments where the index has more
+    than one shard) — they are ``None`` everywhere else. ``partial`` is
+    ``True`` when at least one shard contributed nothing.
+    ``degraded_shards`` lists the failing shard IDs and is present only
+    when non-empty. Note: rerank options are NOT applied on the sharded
+    path, and results are deduped by external ID keeping the highest
+    score.
+    """
+
     results: list[SearchResult] = Field(default_factory=list)
     total: int = 0
+    partial: bool | None = None
+    shards_total: int | None = None
+    shards_ok: int | None = None
+    degraded_shards: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +416,20 @@ class LiveIndexStats(_Loose):
 class PendingStatus(_Loose):
     index_id: str
     pending_count: int
+
+
+class FlushResponse(_Loose):
+    """Body returned by ``POST .../indexes/{id}/flush``."""
+
+    flushed: bool = False
+
+
+class RebuildGraphResponse(_Loose):
+    """Body returned by ``POST .../indexes/{id}/rebuild-graph``."""
+
+    rebuilt: bool = False
+    chunks: int = 0
+    wall_ms: int = 0
 
 
 class ProcessPendingResponse(_Loose):

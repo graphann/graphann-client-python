@@ -187,7 +187,6 @@ class Client:
         - Transport errors (``httpx.ConnectError``, timeouts, etc.).
         """
         attempt = 0
-        last_exc: BaseException | None = None
         start = time.monotonic()
         while True:
             try:
@@ -199,7 +198,6 @@ class Client:
                     content=plan.body,
                 )
             except httpx.HTTPError as exc:
-                last_exc = exc  # noqa: F841
                 if (
                     not is_retriable_transport_error(exc)
                     or attempt >= self._retry.max_retries
@@ -238,9 +236,6 @@ class Client:
                 duration,
                 {"method": plan.method, "status": str(status)},
             )
-            # last_exc is unused on the success branch but retained so
-            # diagnostic tooling can pick it up via locals if needed.
-            del last_exc
             return process_response(response)
 
     def _request(
@@ -388,6 +383,16 @@ class Client:
         compression: str | None = None,
         approximate: bool | None = None,
     ) -> M.Index:
+        """``PATCH .../indexes/{indexID}`` — partial merge; omitted
+        (``None``) fields are untouched.
+
+        ``compression`` accepts ``""``, ``"none"``, ``"scalar"``,
+        ``"binary"``, ``"pq"``, ``"recompute"``. A compression change
+        persists metadata only — no rebuild; it takes effect at the next
+        compaction. Note ``""`` and ``"none"`` both fold to the server's
+        ``--default-compression``. ``approximate`` changes propagate to a
+        loaded live index immediately.
+        """
         body = self._dump(
             M.UpdateIndexRequest(
                 name=name,
@@ -421,13 +426,45 @@ class Client:
     def compact_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
         """``POST .../compact``.
 
-        Raises :class:`graphann.errors.ConflictError` (HTTP 409) when a
-        compaction is already in flight — treat as retryable.
+        Compaction runs asynchronously server-side; the 200 ack carries
+        ``{"index_id", "status": "compacting", "message"}``. This
+        endpoint provides no completion poll — observe progress via
+        live-stats. Raises :class:`graphann.errors.ConflictError`
+        (HTTP 409) when a compaction is already in flight — treat as
+        retryable after a backoff.
         """
         data = self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/compact"
         )
         return data if isinstance(data, dict) else {}
+
+    def flush_index(self, tenant_id: str, index_id: str) -> M.FlushResponse:
+        """``POST .../flush`` — persist the live index's in-memory delta.
+
+        Pairs with the ``defer_save`` / ``bulk`` ingest options: any
+        pending bulk-deferred HNSW graph is built once (concurrently)
+        inside the flush and persisted with it. Safe to call on a clean
+        index (no-op-ish rewrite).
+        """
+        data = self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/flush"
+        )
+        self._invalidate_search_cache()
+        return self._validate(M.FlushResponse, data)
+
+    def rebuild_graph(self, tenant_id: str, index_id: str) -> M.RebuildGraphResponse:
+        """``POST .../rebuild-graph`` — in-place delta-HNSW rebuild.
+
+        Migration endpoint for indexes ingested before the 2026-06
+        neighbor-selection fix (fragmented live graphs capping recall).
+        Raises :class:`graphann.errors.ConflictError` (HTTP 409) while a
+        compaction is in progress.
+        """
+        data = self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/rebuild-graph"
+        )
+        self._invalidate_search_cache()
+        return self._validate(M.RebuildGraphResponse, data)
 
     def clear_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
         data = self._request(
@@ -462,9 +499,40 @@ class Client:
         tenant_id: str,
         index_id: str,
         documents: Iterable[M.DocumentInput | dict[str, Any]],
+        *,
+        defer_save: bool | None = None,
+        bulk: bool | None = None,
     ) -> M.AddDocumentsResponse:
-        """``POST /v1/tenants/{tenantID}/indexes/{indexID}/documents``."""
-        payload = {"documents": self._document_payload(documents)}
+        """``POST /v1/tenants/{tenantID}/indexes/{indexID}/documents``.
+
+        Documents may carry a precomputed ``vector`` to skip server-side
+        embedding — but it is all-or-nothing per batch: mixing vector and
+        non-vector documents yields HTTP 400. Precomputed inserts upsert
+        by external ID; the per-document ``upsert`` flag only applies on
+        the text (embedding) path.
+
+        :param defer_save: Skip the per-batch full-delta save. Data stays
+            in memory (index dirty) but is still searchable; persist with
+            :meth:`flush_index`.
+        :param bulk: Implies ``defer_save`` and additionally defers the
+            per-document HNSW insert — the delta graph is built once,
+            concurrently, at flush time. Bulk-ingested data is not
+            searchable until the graph is built; as a safety net the
+            first search against a pending build triggers it
+            (build-on-read).
+
+        Both default to ``None`` (omitted), preserving the server's
+        per-batch, immediately-searchable behavior. The response's
+        ``external_ids`` is populated only when the server minted IDs
+        (sharded ingest of id-less documents) — persist those as the
+        durable document IDs. Note the 16 MB request-body cap, which
+        limits precomputed batches to roughly 1700 documents.
+        """
+        payload: dict[str, Any] = {"documents": self._document_payload(documents)}
+        if defer_save is not None:
+            payload["defer_save"] = defer_save
+        if bulk is not None:
+            payload["bulk"] = bulk
         data = self._request(
             "POST",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents",
@@ -678,6 +746,7 @@ class Client:
         rerank: bool | None = None,
         candidate_k: int | None = None,
         rerank_k: int | None = None,
+        ef_search: int | None = None,
         coalesce: bool = True,
         cache: bool = True,
     ) -> list[M.SearchResult]:
@@ -693,6 +762,54 @@ class Client:
 
         Vector-only requests ignore ``rerank`` (cross-encoders need
         the raw query text).
+
+        ``ef_search`` overrides the server's default HNSW beam width
+        (``--search-ef``, default 64) for this query only. The server
+        clamps rather than rejects: negative → default, > 2000 → 2000.
+        Binary / PQ flat-scan modes ignore it.
+
+        Use :meth:`search_full` to also receive the response envelope
+        (sharded-search metadata such as ``partial``).
+        """
+        return self.search_full(
+            tenant_id,
+            index_id,
+            query=query,
+            vector=vector,
+            k=k,
+            filter=filter,
+            rerank=rerank,
+            candidate_k=candidate_k,
+            rerank_k=rerank_k,
+            ef_search=ef_search,
+            coalesce=coalesce,
+            cache=cache,
+        ).results
+
+    def search_full(
+        self,
+        tenant_id: str,
+        index_id: str,
+        *,
+        query: str | None = None,
+        vector: list[float] | None = None,
+        k: int | None = 10,
+        filter: M.SearchFilter | dict[str, Any] | None = None,
+        rerank: bool | None = None,
+        candidate_k: int | None = None,
+        rerank_k: int | None = None,
+        ef_search: int | None = None,
+        coalesce: bool = True,
+        cache: bool = True,
+    ) -> M.SearchResponse:
+        """Like :meth:`search` but returns the full response envelope.
+
+        On sharded cluster deployments (index ``shard_count > 1``) the
+        envelope additionally carries ``partial`` / ``shards_total`` /
+        ``shards_ok`` and — when non-empty — ``degraded_shards``. All
+        other deployments return byte-identical pre-sharding responses,
+        so those fields stay ``None``. Caveat: rerank options are NOT
+        applied on the sharded path.
         """
         if query is None and vector is None:
             raise ValueError("search requires either query or vector")
@@ -704,6 +821,7 @@ class Client:
             rerank=rerank,
             candidate_k=candidate_k,
             rerank_k=rerank_k,
+            ef_search=ef_search,
         )
         data = self._request(
             "POST",
@@ -712,7 +830,7 @@ class Client:
             cacheable=cache,
             coalesce=coalesce,
         )
-        return self._validate(M.SearchResponse, data).results
+        return self._validate(M.SearchResponse, data)
 
     def upsert_resource(
         self,

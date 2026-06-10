@@ -4,6 +4,76 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-10
+
+### Added
+
+- Precomputed-vector ingest: `DocumentInput.vector: list[float] | None`.
+  When **every** document in a batch carries a vector the server skips
+  embedding entirely; mixed batches (some with, some without) are
+  rejected with HTTP 400. Vector length must match the index dimension
+  once set; a fresh index adopts the dimension of the first ingest.
+  Precomputed inserts upsert by external ID (the per-document `upsert`
+  flag only applies on the text path). The 16 MB request-body cap limits
+  precomputed batches to roughly 1700 documents.
+- Bulk-load ingest options: `Client.add_documents` /
+  `AsyncClient.add_documents` accept `defer_save: bool | None` (skip the
+  per-batch save; data stays searchable, persist via `flush_index`) and
+  `bulk: bool | None` (implies `defer_save` and defers the per-document
+  HNSW insert — the delta graph is built once at flush; bulk data is not
+  searchable until then, except that the first search against a pending
+  build triggers it server-side, "build-on-read"). Defaults (`None`,
+  omitted from the wire) preserve the per-batch, immediately-searchable
+  behavior.
+- `Client.flush_index` / `AsyncClient.flush_index` — `POST .../flush`.
+  Persists the live index's in-memory delta and builds any pending
+  bulk-deferred graph in the same flush. Returns the new `FlushResponse`
+  model (`flushed: bool`). Safe to call on a clean index.
+- `Client.rebuild_graph` / `AsyncClient.rebuild_graph` — `POST
+  .../rebuild-graph`. In-place delta-HNSW rebuild for indexes ingested
+  before the 2026-06 neighbor-selection fix. Returns the new
+  `RebuildGraphResponse` model (`rebuilt`, `chunks`, `wall_ms`); raises
+  `ConflictError` (409) while a compaction is in progress.
+- Per-query `ef_search`: new field on `SearchRequest` and keyword
+  argument on `search`. `0`/omitted uses the server default
+  (`--search-ef`, 64). The server clamps rather than rejects (negative →
+  default, cap 2000); binary/PQ flat-scan modes ignore it.
+- `Client.search_full` / `AsyncClient.search_full` — identical signature
+  to `search` but returns the full `SearchResponse` envelope instead of
+  just `results`.
+- Sharded-search metadata on `SearchResponse` (optional, `None` outside
+  sharded cluster deployments): `partial: bool | None`,
+  `shards_total: int | None`, `shards_ok: int | None`, and
+  `degraded_shards: list[str] | None` (present only when non-empty).
+  `partial=True` means at least one shard contributed nothing. Caveats
+  per the server contract: rerank options are not applied on the sharded
+  path, and results are deduped by external ID keeping the highest
+  score.
+- `AddDocumentsResponse.external_ids: list[str] | None` — populated only
+  when the server minted external IDs (sharded ingest of id-less
+  documents; the external ID is the shard routing key). One entry per
+  submitted document, positionally aligned with the request array —
+  persist these as the durable document IDs.
+
+### Fixed
+
+- Body-less mutating requests (`compact_index`, `clear_index`,
+  `process_pending`, `run_index_gc`, `run_admin_gc`, `cleanup_orphans`,
+  and the new `flush_index` / `rebuild_graph`) now send an empty JSON
+  object `{}` with `Content-Type: application/json`. Current servers
+  reject any POST without that header (HTTP 400), so these calls were
+  broken against 2026-06 servers.
+
+### Changed
+
+- `update_index` docstring documents the compression semantics: the
+  change persists metadata only (no rebuild) and takes effect at the
+  next compaction; `""` and `"none"` both fold to the server's
+  `--default-compression`.
+- `compact_index` docstring clarifies the server replies `200 OK` with
+  `{"index_id", "status": "compacting", "message"}` and that compaction
+  completes asynchronously (no poll endpoint — observe via live-stats).
+
 ## [0.6.0] - 2026-05-01
 
 ### Added

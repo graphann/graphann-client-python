@@ -4,18 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphann"
-version = "0.5.0"
+version = "0.7.0"
 description = "Official Python SDK for the GraphANN vector database."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "Apache-2.0"
+license = "LicenseRef-Proprietary"
 license-files = ["LICENSE"]
 authors = [{ name = "GraphANN", email = "support@graphann.com" }]
 keywords = ["graphann", "vector-database", "vector-search", "embeddings", "ann"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
+  "License :: Other/Proprietary License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
