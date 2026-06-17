@@ -111,7 +111,7 @@ async def test_async_coalesces() -> None:
         sf.call("k", slow),
         sf.call("k", slow),
     )
-    assert results == [7, 7, 7]
+    assert list(results) == [7, 7, 7]
     assert counter["n"] == 1
 
 

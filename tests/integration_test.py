@@ -56,7 +56,7 @@ def test_full_ingest_and_search_round_trip() -> None:
             )
             # Allow a moment for any async indexing on smaller boxes.
             time.sleep(0.2)
-            results = c.search_text(t.id, idx.id, "semantic search", k=3)
+            results = c.search(t.id, idx.id, query="semantic search", k=3)
             assert results, "expected at least one search result"
             assert all(r.score >= 0.0 for r in results)
         finally:

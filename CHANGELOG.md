@@ -4,6 +4,36 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-17
+
+### Fixed
+
+- API-key wire contract corrected to match the server
+  (`internal/server/apikey_handlers.go`). The previous request/response
+  field names were wrong:
+  - `create_api_key` now sends `{ "user_id", "name" }`. The signature is
+    `create_api_key(tenant_id, *, name, user_id="")` — `name` is the
+    key's label and is required; `user_id` is optional (empty scopes the
+    key to the tenant). It previously sent a `description` field and made
+    `user_id` a required positional argument.
+  - The create response one-time secret is read from `plaintext`
+    (`ApiKey.plaintext`), not `key`.
+  - `list_api_keys` reads the `api_keys` wrapper key
+    (`ApiKeyList.api_keys`), not `keys`.
+  - Removed invented fields that the server does not emit:
+    `ApiKey.description`, `ApiKey.revoked`, `ApiKey.tenant_id`,
+    `ApiKey.key`, and `ApiKeyList.total`.
+
+  This is mildly breaking: code that read `ApiKey.key`,
+  `ApiKey.description`, `ApiKeyList.keys`, or passed `description=`/a
+  positional `user_id` to `create_api_key` must be updated to the new
+  field and argument names.
+
+### Added
+
+- `AGENTS.md` — an LLM-usage guide for coding agents, with code-first
+  examples grounded in the current SDK surface.
+
 ## [0.7.0] - 2026-06-10
 
 ### Added

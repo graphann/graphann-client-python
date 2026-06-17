@@ -18,7 +18,7 @@ metrics hooks, and Pydantic v2 models for every payload.
 ## Installation
 
 ```bash
-pip install graphann
+pip install graphann==0.8.0
 ```
 
 ## Quickstart

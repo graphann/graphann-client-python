@@ -660,28 +660,38 @@ class LLMSettingsResponse(_Loose):
 
 
 class CreateApiKeyRequest(BaseModel):
+    """Body for ``POST /v1/tenants/{tid}/api-keys``.
+
+    Both fields are sent. ``user_id`` may be empty (scopes the key to the
+    tenant rather than a specific user); ``name`` is the key's label.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str
-    description: str | None = None
+    user_id: str = ""
+    name: str = ""
 
 
 class ApiKey(_Loose):
+    """API key resource.
+
+    ``plaintext`` is only ever populated by ``create_api_key`` — the
+    server returns the one-time secret once and cannot reveal it again.
+    List responses leave it ``None``.
+    """
+
     id: str
-    description: str | None = None
+    name: str | None = None
     user_id: str | None = None
-    tenant_id: str | None = None
     created_at: datetime | None = None
     last_used_at: datetime | None = None
-    revoked: bool | None = None
-    # Plaintext key — only ever returned by ``create_api_key``. Persist it
-    # client-side; the server cannot reveal it again.
-    key: str | None = None
+    # One-time plaintext secret. Returned only by ``create_api_key``;
+    # persist it client-side immediately.
+    plaintext: str | None = None
 
 
 class ApiKeyList(_Loose):
-    keys: list[ApiKey] = Field(default_factory=list)
-    total: int = 0
+    api_keys: list[ApiKey] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -430,3 +430,79 @@ async def test_async_cleanup_orphans_passes_min_age_and_dry_run() -> None:
     sent = route.calls[0].request
     assert sent.url.params.get("min_age") == "24h"
     assert sent.url.params.get("dry_run") == "true"
+
+
+@pytest.mark.asyncio
+async def test_async_create_api_key_sends_user_id_name_parses_plaintext() -> None:
+    import json
+
+    with respx.mock() as mock:
+        route = mock.post(f"{URL}/v1/tenants/t_unit/api-keys").mock(
+            return_value=httpx.Response(
+                201,
+                json={
+                    "id": "k_1",
+                    "name": "ci-key",
+                    "user_id": "u_1",
+                    "plaintext": "sk_live_secret_once",
+                    "created_at": "2026-06-17T00:00:00Z",
+                },
+            )
+        )
+        async with make_client() as c:
+            key = await c.create_api_key("t_unit", name="ci-key", user_id="u_1")
+    assert key.id == "k_1"
+    assert key.name == "ci-key"
+    assert key.plaintext == "sk_live_secret_once"
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"user_id": "u_1", "name": "ci-key"}
+
+
+@pytest.mark.asyncio
+async def test_async_create_api_key_empty_user_id_still_sent() -> None:
+    import json
+
+    with respx.mock() as mock:
+        route = mock.post(f"{URL}/v1/tenants/t_unit/api-keys").mock(
+            return_value=httpx.Response(
+                201,
+                json={
+                    "id": "k_2",
+                    "name": "tenant-key",
+                    "user_id": "",
+                    "plaintext": "x",
+                },
+            )
+        )
+        async with make_client() as c:
+            await c.create_api_key("t_unit", name="tenant-key")
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"user_id": "", "name": "tenant-key"}
+
+
+@pytest.mark.asyncio
+async def test_async_list_api_keys_parses_api_keys_wrapper() -> None:
+    with respx.mock() as mock:
+        mock.get(f"{URL}/v1/tenants/t_unit/api-keys").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "api_keys": [
+                        {
+                            "id": "k_1",
+                            "user_id": "u_1",
+                            "name": "ci-key",
+                            "created_at": "2026-06-17T00:00:00Z",
+                            "last_used_at": "2026-06-17T01:00:00Z",
+                        }
+                    ]
+                },
+            )
+        )
+        async with make_client() as c:
+            listing = await c.list_api_keys("t_unit")
+    assert len(listing.api_keys) == 1
+    item = listing.api_keys[0]
+    assert item.id == "k_1"
+    assert item.name == "ci-key"
+    assert item.plaintext is None

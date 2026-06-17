@@ -954,11 +954,9 @@ class AsyncClient:
     # ==================================================================
 
     async def create_api_key(
-        self, tenant_id: str, user_id: str, *, description: str | None = None
+        self, tenant_id: str, *, name: str, user_id: str = ""
     ) -> M.ApiKey:
-        body = self._dump(
-            M.CreateApiKeyRequest(user_id=user_id, description=description)
-        )
+        body = self._dump(M.CreateApiKeyRequest(user_id=user_id, name=name))
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/api-keys", body=body
         )

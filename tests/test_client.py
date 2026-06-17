@@ -843,3 +843,90 @@ def test_cleanup_orphans_passes_min_age_and_dry_run(
     assert sent is not None
     assert sent.url.params.get("min_age") == "24h"
     assert sent.url.params.get("dry_run") == "true"
+
+
+def test_create_api_key_sends_user_id_and_name_parses_plaintext(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/api-keys",
+        method="POST",
+        json={
+            "id": "k_1",
+            "name": "ci-key",
+            "user_id": "u_1",
+            "plaintext": "sk_live_secret_once",
+            "created_at": "2026-06-17T00:00:00Z",
+        },
+        status_code=201,
+    )
+    with make_client(url) as c:
+        key = c.create_api_key("t_unit", name="ci-key", user_id="u_1")
+    assert key.id == "k_1"
+    assert key.name == "ci-key"
+    assert key.user_id == "u_1"
+    # The one-time secret lives under the "plaintext" json tag.
+    assert key.plaintext == "sk_live_secret_once"
+
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    # Server reads both fields; user_id may be empty but is always sent.
+    assert body == {"user_id": "u_1", "name": "ci-key"}
+
+
+def test_create_api_key_empty_user_id_still_sent(
+    httpx_mock: HTTPXMock, url: str
+) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/api-keys",
+        method="POST",
+        json={"id": "k_2", "name": "tenant-key", "user_id": "", "plaintext": "x"},
+        status_code=201,
+    )
+    with make_client(url) as c:
+        c.create_api_key("t_unit", name="tenant-key")
+
+    req = httpx_mock.get_request()
+    assert req is not None
+    body = json.loads(req.content)
+    assert body == {"user_id": "", "name": "tenant-key"}
+
+
+def test_list_api_keys_parses_api_keys_wrapper(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/api-keys",
+        method="GET",
+        json={
+            "api_keys": [
+                {
+                    "id": "k_1",
+                    "user_id": "u_1",
+                    "name": "ci-key",
+                    "created_at": "2026-06-17T00:00:00Z",
+                    "last_used_at": "2026-06-17T01:00:00Z",
+                }
+            ]
+        },
+    )
+    with make_client(url) as c:
+        listing = c.list_api_keys("t_unit")
+    # Wrapper key is "api_keys", not "keys".
+    assert len(listing.api_keys) == 1
+    item = listing.api_keys[0]
+    assert item.id == "k_1"
+    assert item.name == "ci-key"
+    assert item.user_id == "u_1"
+    # List items never carry the plaintext secret.
+    assert item.plaintext is None
+
+
+def test_revoke_api_key_deletes_by_id(httpx_mock: HTTPXMock, url: str) -> None:
+    httpx_mock.add_response(
+        url=f"{url}/v1/tenants/t_unit/api-keys/k_1",
+        method="DELETE",
+        json={"revoked": True},
+    )
+    with make_client(url) as c:
+        out = c.revoke_api_key("t_unit", "k_1")
+    assert isinstance(out, dict)

@@ -65,13 +65,13 @@ def main() -> None:
             tenant = admin.get_tenant(tenant_id)
         print(f"tenant: {tenant.id}")
 
-        # 2. Mint an API key for the tenant. ``key`` is only ever returned
-        # on creation, so persist it client-side.
+        # 2. Mint an API key for the tenant. ``plaintext`` is only ever
+        # returned on creation, so persist it client-side.
         try:
             api_key = admin.create_api_key(
-                tenant.id, user_id="quickstart", description="quickstart demo"
+                tenant.id, name="quickstart demo", user_id="quickstart"
             )
-            tenant_key = api_key.key or admin_key
+            tenant_key = api_key.plaintext or admin_key
             print(f"api key: {api_key.id}")
         except (GraphANNError, NotImplementedError):
             # API key endpoint may not be enabled on every deployment;
@@ -96,7 +96,7 @@ def main() -> None:
 
         # 6. Search.
         print("\\n=== initial search ===")
-        for hit in c.search_text(tenant.id, idx.id, "vector database", k=5):
+        for hit in c.search(tenant.id, idx.id, query="vector database", k=5):
             print(f"  {hit.score:.3f}  {hit.id}")
 
         # 7. Hot-swap the embedding model. Returns a job ID; the client
@@ -108,7 +108,9 @@ def main() -> None:
                 embedding_backend="ollama",
                 model="nomic-embed-text",
                 dimension=768,
-                endpoint_override=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+                endpoint_override=os.environ.get(
+                    "OLLAMA_URL", "http://localhost:11434"
+                ),
             )
             print(f"\\nreembed job queued: {job.job_id}")
             for _ in range(60):
@@ -122,7 +124,7 @@ def main() -> None:
 
         # 8. Re-run the search.
         print("\\n=== post-swap search ===")
-        for hit in c.search_text(tenant.id, idx.id, "vector database", k=5):
+        for hit in c.search(tenant.id, idx.id, query="vector database", k=5):
             print(f"  {hit.score:.3f}  {hit.id}")
 
 
