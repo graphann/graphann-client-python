@@ -390,6 +390,7 @@ async def test_async_search_full_sharded_fields_and_ef_search() -> None:
         "partial": False,
         "shards_total": 2,
         "shards_ok": 2,
+        "rerank_applied": False,
     }
     with respx.mock() as mock:
         route = mock.post(f"{URL}/v1/tenants/t_unit/indexes/i_1/search").mock(
@@ -401,6 +402,7 @@ async def test_async_search_full_sharded_fields_and_ef_search() -> None:
     assert resp.shards_total == 2
     assert resp.shards_ok == 2
     assert resp.degraded_shards is None  # present only when non-empty
+    assert resp.rerank_applied is False
     body = json.loads(route.calls.last.request.content)
     assert body == {"query": "hello", "k": 10, "ef_search": 128}
 

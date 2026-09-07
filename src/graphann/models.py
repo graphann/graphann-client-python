@@ -4,6 +4,14 @@ The models accept extra fields (``model_config = {"extra": "allow"}``) so
 forward-compatible server changes do not break existing clients. Outbound
 request bodies are strict — ``model_dump(exclude_none=True)`` is used by
 the HTTP layer so optional knobs default to whatever the server picks.
+
+Most classes here are hand-written for ergonomics (stable names, tolerant
+parsing, docstrings) and are kept in sync with ``_generated.py`` by hand
+when the spec drifts. The models for the backup / batch-search / license /
+embed-space-admin endpoints have no pre-existing hand-written counterpart
+(those endpoints were previously unreachable from this SDK), so they are
+re-exported directly from the spec-generated module instead of being
+duplicated by hand -- see ``_generated.py`` for their field definitions.
 """
 
 from __future__ import annotations
@@ -13,10 +21,37 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ._generated import BackupChunkInfo as BackupChunkInfo
+from ._generated import BackupManifest as BackupManifest
+from ._generated import BackupMeta as BackupMeta
+from ._generated import BackupSummary as BackupSummary
+from ._generated import BatchSearchRequest as BatchSearchRequest
+from ._generated import BatchSearchResponse as BatchSearchResponse
+from ._generated import BatchSearchResult as BatchSearchResult
+from ._generated import CompactAllResponse as CompactAllResponse
+from ._generated import CompactAllSkipped as CompactAllSkipped
+from ._generated import CreateBackupResponse as CreateBackupResponse
+from ._generated import DeleteBackupResponse as DeleteBackupResponse
+from ._generated import EmbedSpaceAdminResponse as EmbedSpaceAdminResponse
+from ._generated import EmbedSpaceIndexRow as EmbedSpaceIndexRow
+from ._generated import LicenseAuditEvent as LicenseAuditEvent
+from ._generated import LicenseEntitlements as LicenseEntitlements
+from ._generated import LicenseStatus as LicenseStatus
+from ._generated import ListBackupsResponse as ListBackupsResponse
+from ._generated import RestoreBackupRequest as RestoreBackupRequest
+from ._generated import RestoreBackupResponse as RestoreBackupResponse
+
 __all__ = [
     "AddDocumentsResponse",
     "ApiKey",
     "ApiKeyList",
+    "BackupChunkInfo",
+    "BackupManifest",
+    "BackupMeta",
+    "BackupSummary",
+    "BatchSearchRequest",
+    "BatchSearchResponse",
+    "BatchSearchResult",
     "BulkDeleteByExternalIdsRequest",
     "BulkDeleteByExternalIdsResponse",
     "BulkDeleteRequest",
@@ -28,14 +63,20 @@ __all__ = [
     "ClusterNodeList",
     "ClusterShard",
     "ClusterShardList",
+    "CompactAllResponse",
+    "CompactAllSkipped",
     "CreateApiKeyRequest",
+    "CreateBackupResponse",
     "CreateIndexRequest",
     "CreateTenantRequest",
+    "DeleteBackupResponse",
     "DeleteChunksResponse",
     "Document",
     "DocumentInput",
     "DocumentListEntry",
     "DocumentListPage",
+    "EmbedSpaceAdminResponse",
+    "EmbedSpaceIndexRow",
     "FlushResponse",
     "GCResponse",
     "Health",
@@ -49,6 +90,10 @@ __all__ = [
     "JobList",
     "LLMSettings",
     "LLMSettingsResponse",
+    "LicenseAuditEvent",
+    "LicenseEntitlements",
+    "LicenseStatus",
+    "ListBackupsResponse",
     "LiveIndexStats",
     "MultiSearchRequest",
     "MultiSearchResponse",
@@ -61,6 +106,8 @@ __all__ = [
     "PendingStatus",
     "ProcessPendingResponse",
     "RebuildGraphResponse",
+    "RestoreBackupRequest",
+    "RestoreBackupResponse",
     "SearchRequest",
     "SearchResponse",
     "SearchResult",
@@ -127,9 +174,7 @@ class CreateTenantRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-IndexStatusValue = Literal[
-    "empty", "building", "ready", "error", "compacting", "cleared"
-]
+IndexStatusValue = Literal["pending", "building", "ready", "error", "deleted"]
 
 
 class Index(_Loose):
@@ -145,7 +190,7 @@ class Index(_Loose):
     dimension: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    # Compression strategy configured for this index (e.g. "none", "pq").
+    # Compression strategy configured for this index (e.g. "scalar", "pq").
     compression: str | None = None
     # Whether approximate (HNSW) search is enabled.
     approximate: bool | None = None
@@ -162,7 +207,7 @@ class CreateIndexRequest(BaseModel):
     name: str
     description: str | None = None
     id: str | None = None
-    # Optional compression strategy: "none", "scalar", "binary", "pq", "recompute", or "".
+    # Optional compression strategy: "scalar", "binary", "pq", "recompute", or "".
     compression: str | None = None
     # Optional: enable approximate (HNSW) search. None defers to server default.
     approximate: bool | None = None
@@ -177,6 +222,16 @@ class UpdateIndexRequest(BaseModel):
     compression: str | None = None
     # Optional approximate-search flag update.
     approximate: bool | None = None
+    # Per-index embedding backend override. Remote backends only ("" |
+    # "ollama" | "openai"); "" clears the override back to the
+    # process-wide embedder.
+    embedding_backend: str | None = None
+    embedding_model: str | None = None
+    # SSRF-validated at PATCH time (public http/https hosts only).
+    embedding_endpoint: str | None = None
+    embedding_dimension: int | None = None
+    # ENV VAR NAME holding the backend key -- never the key itself.
+    embedding_api_key_env: str | None = None
 
 
 class IndexStatus(_Loose):
@@ -193,14 +248,21 @@ class IndexStatus(_Loose):
 class DocumentInput(BaseModel):
     """A document to ingest into an index.
 
-    Either ``text`` or ``content`` is accepted by the server; ``text`` is
-    the canonical name. ``id`` becomes the document's external ID.
+    Either ``text`` or ``content`` is accepted by the server -- ``content``
+    is an alias for ``text``; if both are set, ``text`` takes precedence.
+    Supply at least one. ``id`` becomes the document's external ID.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str | None = None
-    text: str
+    # Was required; the server accepts ``content`` alone (see below), so
+    # this is now optional to match. Breaking change: callers that always
+    # passed ``text`` are unaffected, but static type checkers no longer
+    # require it.
+    text: str | None = None
+    # Alias for ``text``. If both are set, ``text`` wins server-side.
+    content: str | None = None
     metadata: dict[str, Any] | None = None
     upsert: bool = False
     expires_at: datetime | None = None
@@ -213,6 +275,9 @@ class DocumentInput(BaseModel):
     # HTTP 400. Vector length must match the index dimension once it is
     # set (a fresh index accepts any length; first ingest fixes it).
     vector: list[float] | None = None
+    # Same embedding as ``vector``, base64-encoded little-endian float32.
+    # Cheaper to decode for bulk loads. Set one or the other, never both.
+    vector_b64: str | None = None
 
 
 class AddDocumentsResponse(_Loose):
@@ -321,6 +386,10 @@ class SearchFilter(BaseModel):
     metadata_filter: dict[str, Any] | None = None
     # Generic metadata pre-filter: every key/value pair must match (string equality).
     equals: dict[str, str] | None = None
+    # Drops chunk text from every result. At k=10, text is ~75% of the
+    # response body; skipping it also skips the per-result zstd
+    # decompression of the chunk text store. Off by default.
+    omit_text: bool | None = None
 
 
 class SearchRequest(BaseModel):
@@ -351,6 +420,18 @@ class SearchRequest(BaseModel):
     # 2000 are capped. Binary / PQ flat-scan modes ignore it entirely.
     ef_search: int | None = None
 
+    # Query vector as base64-encoded little-endian float32 -- cheaper to
+    # decode than ``vector`` (query JSON decoding measured at 17.5% of
+    # server CPU under load). Mutually exclusive with ``vector``: set one
+    # or the other, never both.
+    vector_b64: str | None = None
+
+    # Fuses dense (semantic) results with a BM25 lexical ranking via
+    # Reciprocal Rank Fusion. Text-query searches only; ignored for
+    # vector-only requests. Falls back to dense-only if the lexical
+    # index can't be built. Default False preserves prior behavior.
+    hybrid: bool | None = None
+
 
 class SearchResult(_Loose):
     """One hit in a search response.
@@ -380,9 +461,8 @@ class SearchResponse(_Loose):
     than one shard) — they are ``None`` everywhere else. ``partial`` is
     ``True`` when at least one shard contributed nothing.
     ``degraded_shards`` lists the failing shard IDs and is present only
-    when non-empty. Note: rerank options are NOT applied on the sharded
-    path, and results are deduped by external ID keeping the highest
-    score.
+    when non-empty. ``rerank_applied`` reports whether the server applied
+    cross-encoder reranking, including coordinator-side sharded reranking.
     """
 
     results: list[SearchResult] = Field(default_factory=list)
@@ -391,6 +471,7 @@ class SearchResponse(_Loose):
     shards_total: int | None = None
     shards_ok: int | None = None
     degraded_shards: list[str] | None = None
+    rerank_applied: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +787,16 @@ class UpsertResourceRequest(BaseModel):
 
     text: str
     metadata: dict[str, str] | None = None
+    # Optional stable external ID (e.g. document UUID), passed through to
+    # chunk metadata. Distinct from the path ``resource_id``.
+    external_id: str | None = None
+    repo_id: str | None = None
+    file_path: str | None = None
+    commit_sha: str | None = None
+    source_type: str | None = None
+    owner_user_id: str | None = None
+    title: str | None = None
+    url: str | None = None
 
 
 class UpsertResourceResponse(_Loose):

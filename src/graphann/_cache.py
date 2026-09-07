@@ -72,6 +72,13 @@ class ResponseCache:
         self._max = int(max_entries)
         self._data: OrderedDict[str, _Entry] = OrderedDict()
         self._lock = threading.Lock()
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        """Return the current mutation generation."""
+        with self._lock:
+            return self._generation
 
     def get(self, key: str) -> Any | None:
         """Return the cached value or ``None`` if missing/expired."""
@@ -86,10 +93,12 @@ class ResponseCache:
             self._data.move_to_end(key)
             return entry.value
 
-    def set(self, key: str, value: Any) -> None:
-        """Store a value under ``key`` with the configured TTL."""
+    def set(self, key: str, value: Any, *, generation: int | None = None) -> None:
+        """Store a value only if its read generation is still current."""
         expires_at = time.monotonic() + self._ttl
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             self._data[key] = _Entry(value=value, expires_at=expires_at)
             self._data.move_to_end(key)
             while len(self._data) > self._max:
@@ -101,8 +110,9 @@ class ResponseCache:
             self._data.pop(key, None)
 
     def clear(self) -> None:
-        """Drop all cache entries."""
+        """Drop all entries and prevent older reads from repopulating them."""
         with self._lock:
+            self._generation += 1
             self._data.clear()
 
     def __len__(self) -> int:  # pragma: no cover — diagnostic only

@@ -4,6 +4,50 @@ All notable changes to the `graphann` Python SDK are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-09-07
+
+### Fixed
+
+- Keep requests uncompressed by default; positive `gzip_threshold` remains opt-in.
+- Encode resource identifiers as one URL segment in sync and async clients.
+- Invalidate cached reads after successful mutations and prevent older in-flight
+  reads from refilling the cache or serving post-mutation callers.
+- Expose `rerank_applied` and regenerate types from the corrected search response
+  and compression schemas.
+- Support schema generation and staleness checks in standalone SDK checkouts.
+
+### Changed
+
+- Distribute v0.9.1 through GitHub tags and release assets, not PyPI.
+
+## [0.9.0] - 2026-08-11
+
+### Added
+
+- Spec-generated request/response types in `src/graphann/_generated.py`
+  (`datamodel-codegen` against `api/openapi/spec.yaml`; regenerate with
+  `scripts/generate_types.sh`, staleness enforced by
+  `tests/test_generated_staleness.py`).
+- Nine previously-unreachable endpoints: `list_backups`, `create_backup`,
+  `restore_backup`, `delete_backup`, `batch_search`, `compact_all_indexes`,
+  `get_license_status`, `get_license_audit`, `get_embed_space_admin` (sync
+  and async clients).
+- Six request fields the server accepted but the SDK couldn't send:
+  `SearchFilter.omit_text`, `SearchRequest.vector_b64` /
+  `SearchRequest.hybrid`, `DocumentInput.content` /
+  `DocumentInput.vector_b64`, plus the `update_index` `embedding_*`
+  override kwargs and full `upsert_resource` metadata kwargs
+  (`external_id`, `repo_id`, `file_path`, `commit_sha`, `source_type`,
+  `owner_user_id`, `title`, `url`).
+
+### Changed
+
+- `search()` / `search_full()` gained `vector_b64` and `hybrid` kwargs;
+  the "query or vector" `ValueError` now also accepts `vector_b64`.
+- `DocumentInput.text` is now optional (server accepts `content` alone,
+  matching the spec) — existing callers that always pass `text` are
+  unaffected.
+
 ## [0.8.0] - 2026-06-17
 
 ### Fixed

@@ -17,9 +17,15 @@ metrics hooks, and Pydantic v2 models for every payload.
 
 ## Installation
 
+Install v0.9.1 from GitHub in an active virtual environment:
+
 ```bash
-pip install graphann==0.8.0
+python -m pip install 'graphann @ git+https://github.com/graphann/graphann-client-python.git@v0.9.1'
 ```
+
+Releases are distributed through GitHub, not PyPI. The
+[v0.9.1 release](https://github.com/graphann/graphann-client-python/releases/tag/v0.9.1)
+also provides a wheel and source distribution.
 
 ## Quickstart
 
@@ -120,8 +126,8 @@ except AuthenticationError:
   database.
 - **Response cache.** Opt-in LRU + TTL cache, automatically invalidated
   on writes from the same client.
-- **gzip.** Request bodies larger than 64 KiB are compressed before
-  transit.
+- **gzip.** Request compression is disabled by default. Set
+  `gzip_threshold=64 * 1024` only when your deployment accepts gzip requests.
 - **Metrics hook.** Pass `metrics_hook=callable(name, value, labels)` to
   feed Prometheus or OpenTelemetry from any HTTP boundary.
 
@@ -129,6 +135,21 @@ except AuthenticationError:
 
 The package ships with `py.typed` and is `mypy --strict` clean. All
 request and response payloads round-trip through Pydantic v2 models.
+
+## Development
+
+From the Python SDK root, install development dependencies and regenerate types:
+
+```bash
+python -m pip install -e '.[dev]'
+bash scripts/generate_types.sh
+python -m pytest tests/test_generated_staleness.py
+```
+
+Generation and staleness checks prefer `api/openapi/spec.yaml` in a standalone
+checkout, then `../api/openapi/spec.yaml` in the SDK monorepo.
+Set `GRAPHANN_SPEC_PATH` to use another schema. Generated files use a fixed
+header without machine-specific paths.
 
 ## License
 

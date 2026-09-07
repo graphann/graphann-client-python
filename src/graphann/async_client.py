@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterable, Mapping
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     # ``typing.Self`` lands in 3.11; ``typing_extensions`` is shipped by
@@ -218,10 +219,12 @@ class AsyncClient:
         tenant_override: str | None = None,
         cacheable: bool = False,
         coalesce: bool = False,
+        read_only: bool = False,
     ) -> Any:
         plan = self._build_plan(
             method, path, body=body, params=params, tenant_override=tenant_override
         )
+        generation = self._cache.generation if self._cache is not None else 0
         cache_key: str | None = None
         if cacheable and self._cache is not None and method.upper() in {"GET", "POST"}:
             cache_key = make_cache_key(
@@ -232,13 +235,18 @@ class AsyncClient:
                 return cached
 
         if coalesce:
-            sf_key = make_cache_key(method, path, plan.cache_payload(), self.tenant_id)
+            sf_key = f"{generation}:" + make_cache_key(
+                method, path, plan.cache_payload(), self.tenant_id
+            )
             result = await self._singleflight.call(sf_key, lambda: self._send(plan))
         else:
             result = await self._send(plan)
 
-        if cache_key is not None and self._cache is not None:
-            self._cache.set(cache_key, result)
+        if self._cache is not None:
+            if not read_only and method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+                self._cache.clear()
+            elif cache_key is not None:
+                self._cache.set(cache_key, result, generation=generation)
         return result
 
     @staticmethod
@@ -254,10 +262,6 @@ class AsyncClient:
     @staticmethod
     def _dump(model: BaseModel) -> dict[str, Any]:
         return model.model_dump(mode="json", exclude_none=True)
-
-    def _invalidate_search_cache(self) -> None:
-        if self._cache is not None:
-            self._cache.clear()
 
     @staticmethod
     def _document_payload(
@@ -295,7 +299,7 @@ class AsyncClient:
     async def create_tenant(self, name: str, *, id: str | None = None) -> M.Tenant:
         body = self._dump(M.CreateTenantRequest(name=name, id=id))
         data = await self._request("POST", "/v1/tenants", body=body)
-        self._invalidate_search_cache()
+
         return self._validate(M.Tenant, data)
 
     async def get_tenant(self, tenant_id: str) -> M.Tenant:
@@ -304,7 +308,7 @@ class AsyncClient:
 
     async def delete_tenant(self, tenant_id: str) -> dict[str, Any]:
         data = await self._request("DELETE", f"/v1/tenants/{tenant_id}")
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     # ==================================================================
@@ -339,7 +343,7 @@ class AsyncClient:
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes", body=body
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.Index, data)
 
     async def get_index(self, tenant_id: str, index_id: str) -> M.Index:
@@ -357,12 +361,16 @@ class AsyncClient:
         description: str | None = None,
         compression: str | None = None,
         approximate: bool | None = None,
+        embedding_backend: str | None = None,
+        embedding_model: str | None = None,
+        embedding_endpoint: str | None = None,
+        embedding_dimension: int | None = None,
+        embedding_api_key_env: str | None = None,
     ) -> M.Index:
         """``PATCH .../indexes/{indexID}`` — partial merge.
 
         See :meth:`graphann.client.Client.update_index` for the
-        ``compression`` semantics (metadata-only persist; applied at the
-        next compaction).
+        ``compression``/``embedding_*`` semantics.
         """
         body = self._dump(
             M.UpdateIndexRequest(
@@ -370,17 +378,21 @@ class AsyncClient:
                 description=description,
                 compression=compression,
                 approximate=approximate,
+                embedding_backend=embedding_backend,
+                embedding_model=embedding_model,
+                embedding_endpoint=embedding_endpoint,
+                embedding_dimension=embedding_dimension,
+                embedding_api_key_env=embedding_api_key_env,
             )
         )
         data = await self._request(
             "PATCH", f"/v1/tenants/{tenant_id}/indexes/{index_id}", body=body
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.Index, data)
 
     async def delete_index(self, tenant_id: str, index_id: str) -> None:
         await self._request("DELETE", f"/v1/tenants/{tenant_id}/indexes/{index_id}")
-        self._invalidate_search_cache()
 
     async def get_index_status(self, tenant_id: str, index_id: str) -> M.IndexStatus:
         data = await self._request(
@@ -407,6 +419,15 @@ class AsyncClient:
         )
         return data if isinstance(data, dict) else {}
 
+    async def compact_all_indexes(self, tenant_id: str) -> M.CompactAllResponse:
+        """``POST .../indexes/compact-all``. See
+        :meth:`graphann.client.Client.compact_all_indexes`."""
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/compact-all"
+        )
+
+        return self._validate(M.CompactAllResponse, data)
+
     async def flush_index(self, tenant_id: str, index_id: str) -> M.FlushResponse:
         """``POST .../flush`` — persist the live index's in-memory delta.
 
@@ -416,7 +437,7 @@ class AsyncClient:
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/flush"
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.FlushResponse, data)
 
     async def rebuild_graph(
@@ -431,14 +452,14 @@ class AsyncClient:
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/rebuild-graph"
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.RebuildGraphResponse, data)
 
     async def clear_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/clear"
         )
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     # ==================================================================
@@ -470,7 +491,7 @@ class AsyncClient:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents",
             body=payload,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.AddDocumentsResponse, data)
 
     async def import_documents(
@@ -485,7 +506,7 @@ class AsyncClient:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/import",
             body=payload,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.ImportDocumentsResponse, data)
 
     async def get_pending_status(
@@ -502,7 +523,7 @@ class AsyncClient:
         data = await self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/process"
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.ProcessPendingResponse, data)
 
     async def clear_pending(self, tenant_id: str, index_id: str) -> dict[str, Any]:
@@ -527,7 +548,7 @@ class AsyncClient:
             "DELETE",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents/{document_id}",
         )
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     def list_documents(
@@ -565,7 +586,7 @@ class AsyncClient:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.BulkDeleteResponse, data)
 
     async def bulk_delete_by_external_ids(
@@ -577,7 +598,7 @@ class AsyncClient:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents/by-external-id",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.BulkDeleteByExternalIdsResponse, data)
 
     async def cleanup_orphans(
@@ -643,7 +664,7 @@ class AsyncClient:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/chunks/0",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.DeleteChunksResponse, data)
 
     # ==================================================================
@@ -657,12 +678,14 @@ class AsyncClient:
         *,
         query: str | None = None,
         vector: list[float] | None = None,
+        vector_b64: str | None = None,
         k: int | None = 10,
         filter: M.SearchFilter | dict[str, Any] | None = None,
         rerank: bool | None = None,
         candidate_k: int | None = None,
         rerank_k: int | None = None,
         ef_search: int | None = None,
+        hybrid: bool | None = None,
         coalesce: bool = True,
         cache: bool = True,
     ) -> list[M.SearchResult]:
@@ -674,20 +697,23 @@ class AsyncClient:
         the server clamps to ``[k, 1000]``. ``rerank_k`` defaults to
         ``k``. Vector-only requests ignore ``rerank``. ``ef_search``
         overrides the server's default HNSW beam width for this query
-        (clamped, never rejected). Use :meth:`search_full` to also
-        receive the response envelope.
+        (clamped, never rejected). ``hybrid=True`` fuses dense results
+        with a BM25 lexical ranking (text queries only). Use
+        :meth:`search_full` to also receive the response envelope.
         """
         resp = await self.search_full(
             tenant_id,
             index_id,
             query=query,
             vector=vector,
+            vector_b64=vector_b64,
             k=k,
             filter=filter,
             rerank=rerank,
             candidate_k=candidate_k,
             rerank_k=rerank_k,
             ef_search=ef_search,
+            hybrid=hybrid,
             coalesce=coalesce,
             cache=cache,
         )
@@ -700,12 +726,14 @@ class AsyncClient:
         *,
         query: str | None = None,
         vector: list[float] | None = None,
+        vector_b64: str | None = None,
         k: int | None = 10,
         filter: M.SearchFilter | dict[str, Any] | None = None,
         rerank: bool | None = None,
         candidate_k: int | None = None,
         rerank_k: int | None = None,
         ef_search: int | None = None,
+        hybrid: bool | None = None,
         coalesce: bool = True,
         cache: bool = True,
     ) -> M.SearchResponse:
@@ -716,26 +744,59 @@ class AsyncClient:
         ``shards_total`` / ``shards_ok`` / ``degraded_shards``; they
         stay ``None`` everywhere else.
         """
-        if query is None and vector is None:
-            raise ValueError("search requires either query or vector")
+        if query is None and vector is None and vector_b64 is None:
+            raise ValueError(
+                "search requires query, vector, or vector_b64 (query or vector required)"
+            )
         body = M.SearchRequest(
             query=query,
             vector=vector,
+            vector_b64=vector_b64,
             k=k,
             filter=_coerce_filter(filter),
             rerank=rerank,
             candidate_k=candidate_k,
             rerank_k=rerank_k,
             ef_search=ef_search,
+            hybrid=hybrid,
         )
         data = await self._request(
             "POST",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/search",
             body=self._dump(body),
+            read_only=True,
             cacheable=cache,
             coalesce=coalesce,
         )
         return self._validate(M.SearchResponse, data)
+
+    async def batch_search(
+        self,
+        tenant_id: str,
+        index_id: str,
+        queries: Iterable[M.SearchRequest | dict[str, Any]],
+    ) -> M.BatchSearchResponse:
+        """``POST .../search/batch``. See
+        :meth:`graphann.client.Client.batch_search`."""
+        payload: list[dict[str, Any]] = []
+        for q in queries:
+            if isinstance(q, M.SearchRequest):
+                payload.append(q.model_dump(mode="json", exclude_none=True))
+            elif isinstance(q, dict):
+                payload.append(
+                    M.SearchRequest.model_validate(q).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                )
+            else:
+                raise TypeError(f"unsupported query type: {type(q).__name__}")
+        data = await self._request(
+            "POST",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/search/batch",
+            body={"queries": payload},
+            read_only=True,
+        )
+        return self._validate(M.BatchSearchResponse, data)
 
     async def upsert_resource(
         self,
@@ -745,19 +806,40 @@ class AsyncClient:
         text: str,
         *,
         metadata: dict[str, str] | None = None,
+        external_id: str | None = None,
+        repo_id: str | None = None,
+        file_path: str | None = None,
+        commit_sha: str | None = None,
+        source_type: str | None = None,
+        owner_user_id: str | None = None,
+        title: str | None = None,
+        url: str | None = None,
     ) -> M.UpsertResourceResponse:
         """``PUT /v1/tenants/{tid}/indexes/{iid}/resources/{resID}``.
 
         Atomically creates or replaces all chunks for ``resource_id``.
         Returns operation="create" on first upsert, "update" on subsequent ones.
         """
-        body = self._dump(M.UpsertResourceRequest(text=text, metadata=metadata))
+        body = self._dump(
+            M.UpsertResourceRequest(
+                text=text,
+                metadata=metadata,
+                external_id=external_id,
+                repo_id=repo_id,
+                file_path=file_path,
+                commit_sha=commit_sha,
+                source_type=source_type,
+                owner_user_id=owner_user_id,
+                title=title,
+                url=url,
+            )
+        )
         data = await self._request(
             "PUT",
-            f"/v1/tenants/{tenant_id}/indexes/{index_id}/resources/{resource_id}",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/resources/{quote(resource_id, safe='')}",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.UpsertResourceResponse, data)
 
     # ------------------------------------------------------------------
@@ -789,7 +871,7 @@ class AsyncClient:
             "documents": payload_docs,
         }
         data = await self._request("POST", f"/v1/orgs/{org_id}/documents", body=body)
-        self._invalidate_search_cache()
+
         return self._validate(M.OrgSyncResponse, data)
 
     async def multi_search(
@@ -822,6 +904,7 @@ class AsyncClient:
             "POST",
             f"/v1/orgs/{org_id}/users/{user_id}/search",
             body=self._dump(body),
+            read_only=True,
             cacheable=cache,
             coalesce=coalesce,
         )
@@ -868,7 +951,7 @@ class AsyncClient:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/embedding-model",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.HotModelSwitchResponse, data)
 
     async def get_job(self, job_id: str) -> M.Job:
@@ -940,13 +1023,13 @@ class AsyncClient:
         data = await self._request(
             "PATCH", f"/v1/orgs/{org_id}/llm-settings", body=body
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.LLMSettings, data)
 
     async def delete_llm_settings(self, org_id: str) -> dict[str, Any]:
         """``DELETE /v1/orgs/{orgID}/llm-settings`` — reset to defaults."""
         data = await self._request("DELETE", f"/v1/orgs/{org_id}/llm-settings")
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     # ==================================================================
@@ -973,6 +1056,85 @@ class AsyncClient:
             "DELETE", f"/v1/tenants/{tenant_id}/api-keys/{key_id}"
         )
         return data if isinstance(data, dict) else {}
+
+    # ==================================================================
+    # License
+    # ==================================================================
+
+    async def get_license_status(self) -> M.LicenseStatus:
+        """``GET /v1/license/status``. See
+        :meth:`graphann.client.Client.get_license_status`."""
+        data = await self._request("GET", "/v1/license/status")
+        return self._validate(M.LicenseStatus, data)
+
+    async def get_license_audit(
+        self, *, limit: int | None = None
+    ) -> list[M.LicenseAuditEvent]:
+        """``GET /v1/license/audit``. See
+        :meth:`graphann.client.Client.get_license_audit`."""
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        data = await self._request("GET", "/v1/license/audit", params=params or None)
+        items = data if isinstance(data, list) else []
+        return [self._validate(M.LicenseAuditEvent, item) for item in items]
+
+    # ==================================================================
+    # Admin
+    # ==================================================================
+
+    async def get_embed_space_admin(self) -> M.EmbedSpaceAdminResponse:
+        """``GET /v1/admin/embed-space``. See
+        :meth:`graphann.client.Client.get_embed_space_admin`."""
+        data = await self._request("GET", "/v1/admin/embed-space")
+        return self._validate(M.EmbedSpaceAdminResponse, data)
+
+    # ==================================================================
+    # Backups
+    # ==================================================================
+
+    async def create_backup(
+        self, tenant_id: str, index_id: str
+    ) -> M.CreateBackupResponse:
+        """``POST .../indexes/{indexID}/backups``. See
+        :meth:`graphann.client.Client.create_backup`."""
+        data = await self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/backups"
+        )
+        return self._validate(M.CreateBackupResponse, data)
+
+    async def list_backups(self, tenant_id: str) -> M.ListBackupsResponse:
+        """``GET /v1/tenants/{tenantID}/backups``. See
+        :meth:`graphann.client.Client.list_backups`."""
+        data = await self._request(
+            "GET", f"/v1/tenants/{tenant_id}/backups", cacheable=True
+        )
+        return self._validate(M.ListBackupsResponse, data)
+
+    async def restore_backup(
+        self, tenant_id: str, backup_id: str, dest_index: str
+    ) -> M.RestoreBackupResponse:
+        """``POST .../backups/{backupID}/restore``. See
+        :meth:`graphann.client.Client.restore_backup`."""
+        body = self._dump(M.RestoreBackupRequest(dest_index=dest_index))
+        data = await self._request(
+            "POST",
+            f"/v1/tenants/{tenant_id}/backups/{quote(backup_id, safe='')}/restore",
+            body=body,
+        )
+
+        return self._validate(M.RestoreBackupResponse, data)
+
+    async def delete_backup(
+        self, tenant_id: str, backup_id: str
+    ) -> M.DeleteBackupResponse:
+        """``DELETE /v1/tenants/{tenantID}/backups/{backupID}``. See
+        :meth:`graphann.client.Client.delete_backup`."""
+        data = await self._request(
+            "DELETE",
+            f"/v1/tenants/{tenant_id}/backups/{quote(backup_id, safe='')}",
+        )
+        return self._validate(M.DeleteBackupResponse, data)
 
 
 def _coerce_filter(

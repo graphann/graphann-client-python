@@ -84,7 +84,7 @@ DEFAULT_TIMEOUT: httpx.Timeout = httpx.Timeout(
 DEFAULT_LIMITS: httpx.Limits = httpx.Limits(
     max_connections=20, max_keepalive_connections=10, keepalive_expiry=30.0
 )
-DEFAULT_GZIP_THRESHOLD: int = 64 * 1024  # 64 KiB
+DEFAULT_GZIP_THRESHOLD: int = 0  # Request compression requires explicit opt-in.
 
 # Verbs the server's ContentTypeMiddleware gates on ``Content-Type:
 # application/json`` — even when the endpoint reads no body (compact,

@@ -1,0 +1,4493 @@
+openapi: "3.0.3"
+info:
+  title: GraphANN API
+  description: |
+    GraphANN is a storage-efficient vector database. Indexes can persist no
+    embeddings on disk and recompute them on-demand during search (the
+    'recompute' compression mode), or use scalar/PQ/binary quantized codes
+    for a storage-vs-latency trade-off. Up to 95%+ storage savings at scale.
+
+    ## Concepts
+
+    - **Tenant** -- top-level isolation boundary that owns indexes.
+    - **Index** -- a searchable collection of document chunks backed by a
+      CSR graph and product quantizer.
+    - **Document** -- user-supplied text that is chunked, embedded, and
+      indexed. Both `text` and `content` fields are accepted (content is
+      an alias for text).
+    - **Chunk** -- an individual indexed unit derived from a document.
+    - **Org** -- an organization that groups tenants, users, and shared
+      indexes for multi-tenant sync workflows.
+
+    ## Error Format
+
+    All error responses follow the same envelope:
+
+    ```json
+    {
+      "error": {
+        "code": "not_found",
+        "message": "Index not found"
+      }
+    }
+    ```
+  version: "1.0.0"
+  license:
+    name: Proprietary (commercial — all rights reserved)
+  contact:
+    name: GraphANN
+    url: https://github.com/graphann/graphann
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: Health
+    description: Server health and readiness probes.
+  - name: License
+    description: |
+      Local license status and audit trail. Unauthenticated, like
+      /health. Only mounted when the server was started with a license
+      manager configured -- otherwise 404, not 501.
+  - name: Tenants
+    description: Tenant lifecycle management.
+  - name: Indexes
+    description: Index CRUD and status within a tenant.
+  - name: Documents
+    description: Document ingestion and retrieval.
+  - name: Chunks
+    description: Chunk-level operations (get, delete).
+  - name: Search
+    description: Hybrid, text, and vector search.
+  - name: Index Maintenance
+    description: Compaction, clearing, live stats, GC.
+  - name: Batch Import
+    description: Queued document import with auto-processing.
+  - name: Org Documents
+    description: Org-level unified document ingestion.
+  - name: Org Search
+    description: Multi-index search across an org's content.
+  - name: Org Indexes
+    description: Listing indexes scoped to orgs and users.
+  - name: Jobs
+    description: Async job tracking (currently used by hot-model-switch).
+  - name: Embedding Model
+    description: Hot-swap embedding model endpoints.
+  - name: Cluster
+    description: Read-only cluster introspection (nodes, shards, health).
+  - name: Admin
+    description: Cluster-wide admin maintenance (TTL GC, orphan cleanup).
+  - name: Backups
+    description: |
+      Filesystem backup lifecycle (create, list, restore, delete). Only
+      registered when the server was started with --backup-dir; a
+      registered-but-disabled deployment answers every route with 501.
+  - name: API Keys
+    description: Per-tenant API key lifecycle (create, list, revoke). Plaintext is returned exactly once at creation time.
+  - name: LLM Settings
+    description: Org-scoped LLM configuration (provider, model, API key, base URL). API key is masked on read.
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+  # ==========================================================================
+  # Health
+  # ==========================================================================
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: Returns server health status. Always returns 200 when the process is alive.
+      tags: [Health]
+      responses:
+        "200":
+          description: Server is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: healthy
+
+  /ready:
+    get:
+      operationId: readinessCheck
+      summary: Readiness check
+      description: |
+        Returns whether the server is ready to accept traffic.
+        Returns 503 when the tenant manager is not yet initialized.
+      tags: [Health]
+      responses:
+        "200":
+          description: Server is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+              example:
+                status: ready
+        "503":
+          description: Server is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+              example:
+                status: not ready
+                reason: manager not initialized
+
+  # ==========================================================================
+  # License
+  # ==========================================================================
+  /v1/license/status:
+    get:
+      operationId: getLicenseStatus
+      summary: Get local license status
+      description: |
+        Returns this node's current license state snapshot: activation
+        state, entitlements, and fingerprint match. Unauthenticated,
+        like `/health` -- this is the operator's self-serve rebind
+        surface; `current_fingerprint` is what to paste into the
+        licensing panel. Only mounted when the server was started with
+        a license manager; the route is absent (404) otherwise, never
+        501.
+      tags: [License]
+      responses:
+        "200":
+          description: License status snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenseStatus"
+              example:
+                state: active
+                license_id: lic_abc123
+                entitlements:
+                  max_tenants: 50
+                  max_memory_bytes: 17179869184
+                  max_cpu: 8
+                  max_disk_bytes: 1099511627776
+                current_fingerprint: fp_9c2e1a
+                bound_fingerprint: fp_9c2e1a
+                fingerprint_match: true
+
+  /v1/license/audit:
+    get:
+      operationId: getLicenseAudit
+      summary: Get local license audit trail
+      description: |
+        Returns this node's own local license state-transition history,
+        newest first -- not the staff panel's cross-customer audit
+        trail. Unauthenticated, same posture as `/v1/license/status`.
+        Only mounted when the server was started with a license
+        manager.
+      tags: [License]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Maximum number of events to return. Omitted, zero, negative,
+            or greater than 1000 are all clamped to 1000.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: |
+            Audit events, newest first. The response body is a bare
+            JSON array, not wrapped in an object.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LicenseAuditEvent"
+        "500":
+          description: |
+            The audit provider failed to read its log. The body is a
+            flat `{"error": "<message>"}` object -- NOT the standard
+            `ErrorEnvelope` -- this route bypasses the handler error
+            helpers and encodes the provider error directly.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+              example:
+                error: "open /data/license/audit.jsonl: permission denied"
+
+  # ==========================================================================
+  # Tenants
+  # ==========================================================================
+  /v1/tenants:
+    get:
+      operationId: listTenants
+      summary: List tenants
+      description: Returns all registered tenants.
+      tags: [Tenants]
+      responses:
+        "200":
+          description: Tenant list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListTenantsResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createTenant
+      summary: Create a tenant
+      description: |
+        Creates a new tenant. When `id` is provided the operation is
+        idempotent -- if a tenant with that ID already exists it is returned
+        as-is. When `id` is omitted a random UUID is generated.
+      tags: [Tenants]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantRequest"
+            example:
+              name: acme-corp
+      responses:
+        "201":
+          description: Tenant created (or already existed when id was supplied).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}:
+    get:
+      operationId: getTenant
+      summary: Get a tenant
+      description: Returns tenant details by ID.
+      tags: [Tenants]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      responses:
+        "200":
+          description: Tenant found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantDetailResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteTenant
+      summary: Delete a tenant
+      description: |
+        Permanently deletes a tenant and all of its indexes, users, and
+        on-disk data. The operation is destructive and not idempotent at
+        the data layer — re-running it after the tenant is gone returns
+        404.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      responses:
+        "200":
+          description: Tenant deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteTenantResponse"
+              example:
+                deleted: true
+                tenant_id: t_acme
+                name: acme-corp
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Indexes
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes:
+    get:
+      operationId: listIndexes
+      summary: List indexes
+      description: Returns all indexes belonging to the specified tenant.
+      tags: [Indexes]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      responses:
+        "200":
+          description: Index list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListIndexesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createIndex
+      summary: Create an index
+      description: |
+        Creates a new index under the tenant. When `id` is provided the
+        operation is idempotent. When `id` is omitted a random ID is generated.
+      tags: [Indexes]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIndexRequest"
+            examples:
+              minimal:
+                summary: Default compression (server default, currently recompute)
+                value:
+                  name: codebase-docs
+                  description: Documentation embeddings
+              explicit_pq:
+                summary: PQ compression for storage-efficient large-scale workload
+                value:
+                  name: my-pq-index
+                  description: PQ-compressed corpus
+                  compression: pq
+              explicit_none:
+                summary: No compression — lowest latency, largest disk footprint
+                value:
+                  name: my-fast-index
+                  compression: none
+      responses:
+        "201":
+          description: Index created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexInfo"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}:
+    get:
+      operationId: getIndex
+      summary: Get an index
+      description: Returns index metadata and configuration.
+      tags: [Indexes]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Index found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: deleteIndex
+      summary: Delete an index
+      description: Permanently deletes an index and all its data.
+      tags: [Indexes]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "204":
+          description: Index deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updateIndex
+      summary: Update an index
+      description: |
+        Updates index metadata. Supported fields: `name`, `description`,
+        `approximate`, `compression`.
+
+        All fields are optional; only the fields present in the request body
+        are applied (pointer-semantics: omitted field ≠ zero-value).
+
+        **`compression` is advisory:** updating it changes the value that
+        `LiveIndex.Compact` reads at the *next* compaction. The on-disk
+        format of an existing compacted base layer is not changed by this
+        call. To migrate existing data to the new mode, run
+        `graphann recompact` offline or wait for auto-compaction to fire.
+
+        **`approximate`** changes propagate to a loaded LiveIndex immediately;
+        no server restart required.
+      tags: [Indexes]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateIndexRequest"
+      responses:
+        "200":
+          description: Index updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/status:
+    get:
+      operationId: getIndexStatus
+      summary: Get index status
+      description: Returns the current build/ready status of an index.
+      tags: [Indexes]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Index status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexStatusResponse"
+              example:
+                index_id: idx_abc123
+                status: ready
+                error: ""
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ==========================================================================
+  # Documents
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/documents:
+    get:
+      operationId: listDocumentsByPrefix
+      summary: List documents by external-ID prefix
+      description: |
+        Lists live documents whose external ID begins with `prefix`,
+        paginated via `cursor`/`limit`. Useful for admin memory-browse
+        UIs where the client owns the key namespace and wants to
+        enumerate it. Requires an embedding server to be configured.
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+        - name: prefix
+          in: query
+          required: false
+          description: External-ID prefix to match. Omitted/empty matches every document.
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque pagination cursor from a previous response's `next_cursor`.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 100, capped at 1000.
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: Matching documents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListDocumentsResponse"
+              example:
+                documents:
+                  - id: doc-001
+                    text: "First document."
+                    metadata: { source: readme }
+                next_cursor: ""
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: addDocuments
+      summary: Add documents
+      description: |
+        Adds documents to the index incrementally (no full rebuild required).
+        Each document may specify either `text` or `content` -- `content`
+        is an alias for `text` for clients that prefer that field name.
+
+        Requires an embedding server to be configured.
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+        - name: defer_save
+          in: query
+          required: false
+          description: Overrides the body's `defer_save` field when present (boolean string, e.g. true/false/1/0).
+          schema:
+            type: boolean
+        - name: bulk
+          in: query
+          required: false
+          description: Overrides the body's `bulk` field when present (boolean string, e.g. true/false/1/0).
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddDocumentsRequest"
+            example:
+              documents:
+                - text: "GraphANN is a storage-efficient vector database."
+                  metadata: { source: readme }
+                - content: "GraphANN achieves up to 95%+ storage savings at scale."
+                  repo_id: repo-123
+      responses:
+        "201":
+          description: Documents added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddDocumentsResponse"
+              example:
+                added: 2
+                index_id: idx_abc123
+                chunk_ids: [0, 1]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaExceeded"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: bulkDeleteDocuments
+      summary: Bulk delete documents by internal IDs
+      description: |
+        Deletes multiple documents by their internal integer document IDs.
+        All chunks belonging to the specified documents are permanently deleted.
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkDeleteDocumentsRequest"
+            example:
+              document_ids: [0, 1, 2]
+      responses:
+        "200":
+          description: Documents deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDeleteDocumentsResponse"
+              example:
+                index_id: idx_abc123
+                documents_deleted: 3
+                chunks_deleted: 9
+                deleted_per_doc:
+                  "0": 3
+                  "1": 3
+                  "2": 3
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/documents/by-external-id:
+    delete:
+      operationId: bulkDeleteByExternalIDs
+      summary: Bulk delete documents by external IDs
+      description: |
+        Deletes multiple documents by their client-provided external IDs
+        (the `id` field set when adding documents). All chunks belonging
+        to the matched documents are permanently deleted.
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkDeleteByExternalIDsRequest"
+            example:
+              external_ids: ["doc-001", "doc-002"]
+      responses:
+        "200":
+          description: Documents deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDeleteByExternalIDsResponse"
+              example:
+                index_id: idx_abc123
+                documents_deleted: 2
+                chunks_deleted: 6
+                deleted_per_id:
+                  "doc-001": 3
+                  "doc-002": 3
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/resources/{resourceID}:
+    put:
+      operationId: upsertResource
+      summary: Atomically upsert content under a resource ID
+      description: |
+        Tombstones any existing chunks under the given resource_id and adds
+        the new text as fresh chunks under the same resource_id. The whole
+        operation runs under the index write lock — no reader sees both old
+        and new chunks live simultaneously (no partial-update window).
+
+        If the resource doesn't exist, behaves like a create. The response
+        includes counts of chunks added and tombstoned plus an operation
+        marker (`create` | `update`).
+
+        Tombstones are reclaimed at next compaction; until then, deleted
+        chunks count toward delta storage but are excluded from search
+        results via the tombstone bitmap.
+      tags: [Documents]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: indexID
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: resourceID
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stable resource identifier (e.g. a document URL or external primary key).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertResourceRequest"
+      responses:
+        "200":
+          description: Upsert succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpsertResourceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/documents/{docID}:
+    get:
+      operationId: getDocument
+      summary: Get a document
+      description: |
+        Retrieves a document by ID, returning all of its non-deleted chunks
+        ordered by chunk_index. 404 when the document has no live chunks.
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+        - $ref: "#/components/parameters/docID"
+      responses:
+        "200":
+          description: Document found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetDocumentResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: deleteDocument
+      summary: Delete a document
+      description: |
+        Permanently deletes a document and all its chunks.
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+        - $ref: "#/components/parameters/docID"
+      responses:
+        "200":
+          description: Document deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteDocumentResponse"
+              example:
+                deleted_chunks: 3
+                document_id: 0
+                index_id: idx_abc123
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Chunks
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/chunks/{chunkID}:
+    get:
+      operationId: getChunk
+      summary: Get a chunk
+      description: Retrieves a specific chunk by its UUID, including text and metadata.
+      tags: [Chunks]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+        - $ref: "#/components/parameters/chunkID"
+      responses:
+        "200":
+          description: Chunk found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChunkResponse"
+              example:
+                chunk_id: 0
+                text: "GraphANN is a storage-efficient vector database."
+                document_id: 0
+                chunk_index: 0
+                start: 0
+                end: 49
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: deleteChunk
+      summary: Delete a chunk
+      description: |
+        Permanently deletes chunks. Requires a JSON body with `chunk_ids`
+        even though a single chunk ID is in the path (for batch compatibility).
+      tags: [Chunks]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+        - $ref: "#/components/parameters/chunkID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteChunksRequest"
+            example:
+              chunk_ids: [0, 1]
+      responses:
+        "200":
+          description: Chunks deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteChunksResponse"
+              example:
+                deleted: 2
+                index_id: idx_abc123
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Search
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/search:
+    post:
+      operationId: search
+      summary: Search by text query or vector
+      description: |
+        Searches the index using either a text `query` or a raw `vector`
+        (or `vector_b64`) -- exactly one of the two families must be
+        set. A text query is embedded server-side and searched
+        semantically (dense HNSW); a vector search compares the given
+        vector directly against the index. Default `k` is 10 when
+        omitted or zero.
+
+        Supplying both a query and a vector is not what makes a search
+        "hybrid" -- it is not a supported combination at all; only one
+        of the two may be set. Hybrid retrieval is the separate `hybrid`
+        boolean below, which applies only to text queries.
+
+        Set `hybrid: true` to fuse the dense (semantic) results with a
+        BM25 lexical ranking via Reciprocal Rank Fusion (RRF), so
+        rare-token / keyword matches surface alongside semantic ones.
+        Text queries only -- ignored for vector-only requests. Default
+        false (dense-only). Safe to flip on a deployment without a
+        lexical index built: it silently falls back to dense-only
+        results.
+      tags: [Search]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            example:
+              query: "storage efficient vector database"
+              k: 5
+      responses:
+        "200":
+          description: Search results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/QuotaExceeded"
+        "503":
+          $ref: "#/components/responses/IndexNotReady"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/search/batch:
+    post:
+      operationId: batchSearch
+      summary: Run several searches against one index in one request
+      description: |
+        Runs multiple independent queries against one index in a single
+        HTTP request. Each entry in `queries` is a full `SearchRequest`,
+        so a batch can mix text and vector queries, per-query `k`,
+        filters, rerank and `hybrid` settings -- anything valid on
+        `/search` is valid here. Exists because search throughput is
+        bound by per-request socket overhead, not by the search itself;
+        amortising many queries across one request removes most of that
+        overhead. Intended for offline and pipeline callers (evaluation
+        runs, reranking stages, migrations) -- interactive callers
+        should keep using `/search` and its result cache. One query
+        that fails does not fail the batch: its slot in `responses`
+        carries `error` instead of `results`. Capped at 128 queries per
+        request. Each query counts individually against the tenant's
+        query quota.
+      tags: [Search]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchSearchRequest"
+            example:
+              queries:
+                - query: "storage efficient vector database"
+                  k: 5
+                - query: "hybrid search fusion"
+                  k: 5
+                  hybrid: true
+      responses:
+        "200":
+          description: One result (or error) per query, in request order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchSearchResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/IndexNotReady"
+
+  # ==========================================================================
+  # Index Maintenance
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/compact:
+    post:
+      operationId: compactIndex
+      summary: Trigger an immediate compaction of the index
+      description: |
+        Synchronously compacts the index, merging the live delta layer into
+        a new base. The compaction respects the index's stored `compression`
+        field — recompute-mode indexes stay recompute-mode after compact;
+        PQ indexes stay PQ. To change compression mode for an existing
+        index, use the offline `graphann recompact` CLI tool.
+
+        Two-delta safety: writes during compaction land in a fresh delta
+        and are preserved through the swap. No acked write is lost.
+
+        Auto-compaction triggers (size threshold / delta-to-base ratio /
+        pending delta-chunk count / max delta age / daily schedule) on the
+        server can fire compaction without operator intervention; this
+        endpoint is for explicit/manual invocation.
+
+        The count trigger measures *pending delta chunks* — live plus
+        tombstoned (`DeltaChunks + DeletedChunks`) — not tombstones alone.
+        Unlike the ratio trigger it is not gated by a minimum base size, so
+        it reaches small-base indexes the ratio gate excludes by design. The
+        age trigger only fires on an index that has pending delta work, so
+        an untouched index is never rewritten on a timer.
+
+        Concurrency: only one compaction runs per index at a time. The HTTP
+        path and the auto-compaction scheduler share a single source of
+        truth via `CompactionScheduler.IsCompacting`. A second request for
+        the same index while one is already in flight returns 409 Conflict.
+      tags: [Index Maintenance]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Compaction completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompactResponse"
+              example:
+                index_id: idx_abc123
+                status: compacted
+                message: Index compaction completed
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Compaction is already in progress for this index. Either the
+            previous HTTP-triggered run hasn't finished, or auto-compaction
+            is mid-flight. Wait for the in-flight job to complete (poll
+            `graphann_compaction_in_progress{index_id}` Prometheus gauge)
+            and retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: COMPACT_ALREADY_IN_PROGRESS
+                  message: compaction already in progress for this index
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/compact-all:
+    post:
+      operationId: compactAllIndexes
+      summary: Queue compaction for every index in a tenant
+      description: |
+        Queues every index owned by the tenant onto the compaction
+        scheduler; indexes compact one at a time. An index already
+        queued or in flight is reported in `skipped` rather than
+        re-queued. Requires the compaction scheduler to be wired --
+        returns 409 otherwise ("this server was started without it").
+        Track progress via `GET /v1/jobs`.
+      tags: [Index Maintenance]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      responses:
+        "202":
+          description: Compaction queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompactAllResponse"
+              example:
+                tenant_id: t_acme
+                total_indexes: 3
+                queued: [idx_a, idx_b]
+                queued_count: 2
+                skipped:
+                  - index_id: idx_c
+                    reason: already queued or in flight
+                skipped_count: 1
+                message: "Compaction queued; indexes are compacted one at a time. Track progress via GET /v1/jobs."
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The server has no compaction scheduler wired; bulk compaction is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: conflict
+                  message: "bulk compaction requires the compaction scheduler; this server was started without it"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/clear:
+    post:
+      operationId: clearIndex
+      summary: Clear index data
+      description: |
+        Removes all indexed data (chunks, graph, embeddings) while keeping
+        the index configuration and metadata intact.
+      tags: [Index Maintenance]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Index cleared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClearResponse"
+              example:
+                index_id: idx_abc123
+                status: cleared
+                message: Index data cleared successfully
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/live-stats:
+    get:
+      operationId: getLiveIndexStats
+      summary: Get live index statistics
+      description: |
+        Returns detailed statistics for a live (in-memory) index including
+        base/delta chunk counts, deleted chunks, and dirty state. If the index
+        is not loaded as a live index, returns basic metadata from disk.
+      tags: [Index Maintenance]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Index statistics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveStatsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/flush:
+    post:
+      operationId: flushIndex
+      summary: Persist the live index delta
+      description: |
+        Persists in-memory changes to disk. Pairs with `defer_save` on
+        `AddDocumentsRequest`: when ingest defers the per-batch save to
+        avoid an O(N^2) full-delta re-save on large loads, the data
+        stays searchable in memory but is NOT durable until this
+        endpoint runs. Also required after a `bulk` ingest, where the
+        delta HNSW graph itself is deferred and built once, concurrently,
+        here -- bulk-ingested data is not searchable until this endpoint
+        runs.
+      tags: [Index Maintenance]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Delta flushed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlushIndexResponse"
+              example:
+                flushed: true
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/rebuild-graph:
+    post:
+      operationId: rebuildIndexGraph
+      summary: Rebuild the delta HNSW graph in place
+      description: |
+        Rebuilds an index's delta HNSW graph in place from its stored
+        embeddings, using the current HNSW defaults (heuristic neighbor
+        selection, concurrent one-shot build), and persists the result.
+        Migration path for indexes ingested before the 2026-06 neighbor-
+        selection fix (fragmented delta graphs, degraded recall) --
+        operators POST here once per index instead of re-ingesting.
+        Loads the live index first if it is not already resident.
+      tags: [Index Maintenance]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Graph rebuilt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebuildGraphResponse"
+              example:
+                rebuilt: true
+                chunks: 1024
+                wall_ms: 842
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A compaction is in progress on this index; retry after it completes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: conflict
+                  message: "graph rebuild refused: compaction in progress, retry after it completes"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Batch Import
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/import:
+    post:
+      operationId: importDocuments
+      summary: Import documents (auto-process)
+      description: |
+        Queues documents for import and automatically starts background
+        processing (embedding, indexing, compaction). Returns
+        immediately with status `processing`. Use the `/pending` endpoint
+        to check progress.
+      tags: [Batch Import]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportDocumentsRequest"
+            example:
+              documents:
+                - id: doc-001
+                  text: "First document to import."
+                - id: doc-002
+                  text: "Second document to import."
+      responses:
+        "201":
+          description: Documents queued for processing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportDocumentsResponse"
+              example:
+                imported: 2
+                document_ids: [0, 1]
+                index_id: idx_abc123
+                pending_total: 2
+                status: processing
+                message: "Documents queued. Processing and compaction will happen automatically."
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/pending:
+    get:
+      operationId: getPendingStatus
+      summary: Get pending queue status
+      description: Returns the number of documents waiting to be processed.
+      tags: [Batch Import]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Pending status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PendingStatusResponse"
+              example:
+                index_id: idx_abc123
+                pending_count: 5
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: clearPending
+      summary: Clear pending queue
+      description: Discards all pending documents without processing them.
+      tags: [Batch Import]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Pending queue cleared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClearPendingResponse"
+              example:
+                index_id: idx_abc123
+                status: cleared
+                message: Pending documents cleared
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/indexes/{indexID}/process:
+    post:
+      operationId: processPending
+      summary: Process pending queue
+      description: |
+        Synchronously processes all pending documents: embeds them, adds
+        them to the index, and returns the resulting chunk IDs.
+      tags: [Batch Import]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: Processing completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessPendingResponse"
+              example:
+                index_id: idx_abc123
+                processed: 5
+                chunks_created: 12
+                chunk_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Org -- Documents
+  # ==========================================================================
+  /v1/orgs/{orgID}/documents:
+    post:
+      operationId: syncDocuments
+      summary: Sync documents to an org
+      description: |
+        Unified document ingestion endpoint for organizations. Routes
+        documents to either a **shared** org-level index (with deduplication
+        by `resource_id`) or a **personal** user-level index, based on the
+        `shared` flag.
+
+        Triggers debounced auto-compaction after ingestion.
+      tags: [Org Documents]
+      parameters:
+        - $ref: "#/components/parameters/orgID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncDocumentsRequest"
+            example:
+              user_id: user-42
+              source_type: github
+              shared: true
+              documents:
+                - resource_id: "github:repo/file.go"
+                  text: "package main ..."
+                  metadata:
+                    repo_id: repo-123
+                    file_path: main.go
+                    commit_sha: abc123
+      responses:
+        "201":
+          description: Documents synced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncDocumentsResponse"
+              example:
+                synced: 1
+                org_id: org-acme
+                user_id: user-42
+                source_type: github
+                index_type: shared
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Org -- Search
+  # ==========================================================================
+  /v1/orgs/{orgID}/users/{userID}/search:
+    post:
+      operationId: searchMultiIndex
+      summary: Multi-index search
+      description: |
+        Searches across all of a user's accessible content within an org.
+        This includes the user's personal indexes and any shared indexes
+        they have access to, filtered by RBAC rules.
+
+        By default returns **all** relevant results from **all** discovered
+        source types. Use `sources` to restrict to specific integrations.
+        Results are sorted by distance (best match first) and deduplicated
+        by `content_id` within each source type.
+      tags: [Org Search]
+      parameters:
+        - $ref: "#/components/parameters/orgID"
+        - $ref: "#/components/parameters/userID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MultiSearchRequest"
+            example:
+              query: "what happened today?"
+              include_text: true
+              sources: ["github", "slack"]
+              start_time: 1711670400
+      responses:
+        "200":
+          description: Search results from multiple indexes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiSearchResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Org -- Index Listing
+  # ==========================================================================
+  /v1/orgs/{orgID}/users/{userID}/indexes:
+    get:
+      operationId: listUserIndexes
+      summary: List user indexes
+      description: Returns all personal indexes for a user within an org.
+      tags: [Org Indexes]
+      parameters:
+        - $ref: "#/components/parameters/orgID"
+        - $ref: "#/components/parameters/userID"
+      responses:
+        "200":
+          description: User index list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgIndexListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/orgs/{orgID}/shared/indexes:
+    get:
+      operationId: listSharedIndexes
+      summary: List shared indexes
+      description: Returns all shared indexes for the org.
+      tags: [Org Indexes]
+      parameters:
+        - $ref: "#/components/parameters/orgID"
+      responses:
+        "200":
+          description: Shared index list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SharedIndexListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Embedding Model — hot-swap (async)
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/embedding-model:
+    patch:
+      operationId: switchEmbeddingModel
+      summary: Hot-swap embedding model (async)
+      description: |
+        Queues an async re-embed of every chunk in the index against a
+        new embedding backend / model. Returns immediately with a
+        `job_id` that can be polled via `GET /v1/jobs/{jobID}`.
+
+        Authorization: requires `Admin` or `Editor` role when auth is
+        active. In permissive (no-auth) mode this check is skipped.
+
+        Conflict semantics: if a reembed job for this index is already
+        queued or running the request is rejected with 409 and the
+        existing job id is reported under `error.details.job_id`.
+
+        Backends accepted over HTTP are intentionally narrower than the
+        CLI: `ollama`, `openai`, `local_onnx`. `mock` is rejected.
+      tags: [Embedding Model]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SwitchEmbeddingModelRequest"
+            example:
+              embedding_backend: openai
+              model: text-embedding-3-small
+              dimension: 1536
+              api_key: sk-...
+      responses:
+        "202":
+          description: Job accepted and queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SwitchEmbeddingModelResponse"
+              example:
+                job_id: job_d3f3...-...
+                status: queued
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A reembed job is already in flight for this index.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: conflict
+                  message: a reembed job is already in flight for this index
+                  details:
+                    job_id: job_abcd...
+                    status: running
+        "503":
+          description: Job queue is full.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  # ==========================================================================
+  # Jobs — async job tracking
+  # ==========================================================================
+  /v1/jobs:
+    get:
+      operationId: listAllJobs
+      summary: List jobs across every tenant (admin only)
+      description: |
+        Lists jobs across all tenants. Requires `Admin` role when auth
+        is active. Permissive (no-auth) mode allows access. Supports
+        `status`, `cursor`, and `limit` query parameters.
+      tags: [Jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [queued, running, completed, failed]
+          description: Filter to one job status.
+        - in: query
+          name: cursor
+          schema:
+            type: string
+          description: |
+            Opaque cursor returned in `next_cursor` of a previous page.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+          description: Max jobs per page (default 50, hard cap 200).
+      responses:
+        "200":
+          description: Job list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/jobs/{jobID}:
+    get:
+      operationId: getJob
+      summary: Get a job by ID
+      description: |
+        Returns the public view of a job (id, kind, tenant/index,
+        status, progress, timestamps, error). API keys passed when the
+        job was created are NEVER echoed back.
+
+        Authorization: when auth is active the request must be from
+        the same tenant that owns the job; otherwise 403 is returned.
+      tags: [Jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: jobID
+          required: true
+          schema:
+            type: string
+          description: Job identifier returned by an earlier PATCH.
+          example: job_8b1c...-...
+      responses:
+        "200":
+          description: Job found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/jobs:
+    get:
+      operationId: listTenantJobs
+      summary: List jobs for a tenant
+      description: |
+        Lists jobs scoped to a single tenant. Same query parameters as
+        `GET /v1/jobs`.
+      tags: [Jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [queued, running, completed, failed]
+        - in: query
+          name: cursor
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        "200":
+          description: Job list scoped to tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # Index Maintenance — TTL GC (per index + global)
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/gc:
+    post:
+      operationId: runIndexGC
+      summary: Run TTL garbage collection on a single index
+      description: |
+        Triggers a TTL sweep over the named index. Documents whose
+        `expires_at` has passed are tombstoned and become eligible for
+        the next compaction. Returns the number of expired chunks
+        observed. Manual replacement for the background sweep on
+        demand — operators may call this after a bulk ingest with TTL
+        instead of waiting for the periodic timer.
+      tags: [Index Maintenance]
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "200":
+          description: TTL sweep completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GCResponse"
+              example:
+                index_id: idx_abc123
+                expired: 17
+                status: ok
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/gc:
+    post:
+      operationId: runGlobalGC
+      summary: Run TTL garbage collection across every loaded index
+      description: |
+        Cluster-wide TTL sweep. Iterates all loaded indexes and tombstones
+        documents past their `expires_at`. Same per-index behaviour as
+        `POST /v1/tenants/{tenantID}/indexes/{indexID}/gc` but takes the
+        union across the manager's loaded set.
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Aggregate TTL sweep result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminGCResponse"
+              example:
+                indexes_swept: 12
+                expired: 134
+                status: ok
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/cleanup-orphans:
+    post:
+      operationId: cleanupOrphans
+      summary: Remove orphan compaction directories
+      description: |
+        Sweeps `data/.../compaction-tmp-*` directories left behind by
+        crashed or interrupted compactions. Removes only directories
+        older than the cutoff (default 1 h) so concurrent in-flight
+        compactions are not affected. Returns the list of removed paths
+        and the total bytes freed.
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: min_age
+          in: query
+          required: false
+          description: |
+            Minimum age a compaction-tmp directory must have before it is
+            eligible for removal, as a Go duration string. Defaults to 1h.
+            The server rejects values below 5m, because a shorter cutoff can
+            race an in-flight compaction and delete a directory still in use.
+          schema:
+            type: string
+            example: "24h"
+        - name: dry_run
+          in: query
+          required: false
+          description: |
+            When true, report what would be removed without deleting anything.
+            The response echoes this flag and `removed` lists the candidates.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Orphan cleanup result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCleanupResponse"
+              example:
+                removed:
+                  - data/t_acme/i_abc/compaction-tmp-1714000000
+                freed_bytes: 4096
+                status: ok
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/embed-space:
+    get:
+      operationId: getEmbedSpaceAdmin
+      summary: Fleet-wide embedding-space observability
+      description: |
+        Answers "how many indexes are actually being fingerprint-checked,
+        and which ones are not" without reading logs or shelling into
+        the box. One row per catalog index (cold indexes included --
+        their on-disk header is peeked, not loaded); `sum(counts.values())`
+        always equals `len(indexes)`.
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Fleet embedding-space snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbedSpaceAdminResponse"
+              example:
+                server_model: bge-small-en-v1.5
+                server_dimension: 384
+                server_embed_fingerprint: fp_a1b2c3
+                policy: warn
+                counts:
+                  unknown: 0
+                  verified: 40
+                  mismatch: 0
+                  external_unverified: 2
+                  external_agree: 1
+                  external_diverged: 0
+                indexes:
+                  - index_id: idx_abc123
+                    tenant_id: t_acme
+                    loaded: true
+                    state: verified
+                    embed_fingerprint: fp_a1b2c3
+                    detail: ""
+                    checked_at: "2026-08-10T12:00:00Z"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ==========================================================================
+  # Cluster — read-only introspection
+  # ==========================================================================
+  /v1/cluster/nodes:
+    get:
+      operationId: listClusterNodes
+      summary: List cluster nodes + Raft leader (Admin only)
+      description: |
+        Returns the current gossip member list with each node's last-seen
+        timestamp, plus the current Raft leader id. When auth is active
+        the request must come from a user with `Admin` role.
+
+        Single-node / non-clustered deployments return 200 with an empty
+        node list and `leader` = "" so admin UIs can detect cluster mode
+        without speculative retries on 503.
+      tags: [Cluster]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Cluster member list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListClusterNodesResponse"
+              example:
+                nodes:
+                  - id: node1
+                    addr: 10.0.0.1:50051
+                    zone: us-east-1a
+                    state: alive
+                    last_seen: 2026-04-24T12:30:00Z
+                leader: node1
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/cluster/shards:
+    get:
+      operationId: listClusterShards
+      summary: List shard placement (Admin only)
+      description: |
+        Returns the current shard placement map: per-shard primary,
+        replica list, and zone placement. Read-only — placement changes
+        go through the gRPC control plane.
+      tags: [Cluster]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Shard placement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListClusterShardsResponse"
+              example:
+                shards:
+                  - id: shard-0
+                    primary: node1
+                    replicas: [node1, node2, node3]
+                    zone_placement:
+                      us-east-1a: node1
+                      us-east-1b: node2
+                      us-east-1c: node3
+                rf: 3
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/cluster/health:
+    get:
+      operationId: clusterHealth
+      summary: Cluster health probe
+      description: |
+        Cheap aggregate cluster health check. Intentionally
+        unauthenticated — matches `/metrics` policy so liveness probes
+        and reverse proxies can wire it up without secret rotation.
+
+        Returns 200 in `ok` and `degraded` states; 503 in `unhealthy`
+        (no nodes alive or no Raft leader). Single-node / non-clustered
+        deployments return 200 with `cluster_size` = 0.
+      tags: [Cluster]
+      responses:
+        "200":
+          description: Cluster healthy or degraded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterHealthResponse"
+              example:
+                status: ok
+                cluster_size: 3
+                alive_nodes: 3
+                raft_has_leader: true
+                under_replicated_shards: 0
+        "503":
+          description: Cluster is unhealthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterHealthResponse"
+
+  # ==========================================================================
+  # Backups (tenant/index-scoped)
+  # ==========================================================================
+  /v1/tenants/{tenantID}/indexes/{indexID}/backups:
+    post:
+      operationId: createBackup
+      summary: Create an index backup
+      description: |
+        Snapshots the index into the configured filesystem backup
+        storage and returns the new backup id plus its manifest. Only
+        registered when the server was started with `--backup-dir`; a
+        registered-but-disabled deployment answers every backup route
+        with 501 so clients can distinguish "backups are off" from
+        "route missing" (404).
+      tags: [Backups]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/indexID"
+      responses:
+        "201":
+          description: Backup created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateBackupResponse"
+              example:
+                backup_id: backups/t_acme/idx_abc123/20260810T120000_000000000Z
+                manifest:
+                  version: 1
+                  id: backups/t_acme/idx_abc123/20260810T120000_000000000Z
+                  created_at: "2026-08-10T12:00:00Z"
+                  meta:
+                    tenant_id: t_acme
+                    index_id: idx_abc123
+                    graphann_version: "1.0.0"
+                  chunks:
+                    - key: base/index.bin
+                      size: 4096
+                      sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a5"
+                  total_size: 4096
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/BackupDisabled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/backups:
+    get:
+      operationId: listBackups
+      summary: List a tenant's backups
+      description: |
+        Returns every backup summary for the tenant. NOTE:
+        `BackupSummary` has no JSON struct tags on the server, so its
+        fields serialize with their Go field names (`ID`, `TenantID`,
+        `IndexID`, `CreatedAt`, `TotalSize`, `NumChunks`) rather than
+        the snake_case used everywhere else in this API.
+      tags: [Backups]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      responses:
+        "200":
+          description: Backup list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListBackupsResponse"
+              example:
+                backups:
+                  - ID: backups/t_acme/idx_abc123/20260810T120000_000000000Z
+                    TenantID: t_acme
+                    IndexID: idx_abc123
+                    CreatedAt: "2026-08-10T12:00:00Z"
+                    TotalSize: 4096
+                    NumChunks: 1
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "501":
+          $ref: "#/components/responses/BackupDisabled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/backups/{backupID}/restore:
+    post:
+      operationId: restoreBackup
+      summary: Restore a backup into an index
+      description: |
+        Restores the named backup into the destination index given by
+        `dest_index` in the body; the destination tenant is the path
+        tenant. `backupID` is percent-encoded by the client because a
+        backup id contains slashes.
+      tags: [Backups]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/backupID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestoreBackupRequest"
+            example:
+              dest_index: idx_restored
+      responses:
+        "200":
+          description: Backup restored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RestoreBackupResponse"
+              example:
+                status: restored
+                index_id: idx_restored
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/BackupDisabled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/backups/{backupID}:
+    delete:
+      operationId: deleteBackup
+      summary: Delete a backup
+      description: |
+        Permanently deletes a backup from storage. `backupID` is
+        percent-encoded by the client because a backup id contains
+        slashes.
+      tags: [Backups]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - $ref: "#/components/parameters/backupID"
+      responses:
+        "200":
+          description: Backup deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteBackupResponse"
+              example:
+                status: deleted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/BackupDisabled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # API Keys (tenant-scoped, Admin only)
+  # ==========================================================================
+  /v1/tenants/{tenantID}/api-keys:
+    post:
+      operationId: createAPIKey
+      summary: Create an API key
+      description: |
+        Provisions a new API key for a user inside the tenant. The
+        plaintext token is returned EXACTLY ONCE in the `plaintext`
+        field of the response — the server only persists its argon2id
+        hash. Lose the plaintext, rotate the key.
+      tags: [API Keys]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAPIKeyRequest"
+            example:
+              user_id: u_admin
+              name: deploy-bot
+      responses:
+        "201":
+          description: API key created. Plaintext is in the response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAPIKeyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listAPIKeys
+      summary: List API keys
+      description: |
+        Returns every API key owned by the tenant. Hash and salt are
+        intentionally omitted; plaintext is unrecoverable post-create.
+      tags: [API Keys]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+      responses:
+        "200":
+          description: API key list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListAPIKeysResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenantID}/api-keys/{keyID}:
+    delete:
+      operationId: revokeAPIKey
+      summary: Revoke an API key
+      description: |
+        Permanently deletes the named key. Returns 204 on success and
+        404 when the key was already revoked or never existed.
+      tags: [API Keys]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/tenantID"
+        - name: keyID
+          in: path
+          required: true
+          description: API key identifier (e.g. `k_abc123`).
+          schema:
+            type: string
+          example: k_abc123
+      responses:
+        "204":
+          description: Key revoked.
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ==========================================================================
+  # LLM Settings (org-scoped)
+  # ==========================================================================
+  /v1/orgs/{orgID}/llm-settings:
+    get:
+      operationId: getLLMSettings
+      summary: Get LLM settings
+      description: |
+        Returns the LLM configuration for the org. The `api_key` field
+        is masked (`***` + last four characters) so secrets never leave
+        the server in plaintext. Returns the package defaults when the
+        org has no tenant yet — no 404 so the SDK can render a settings
+        UI on first load.
+      tags: [LLM Settings]
+      parameters:
+        - $ref: "#/components/parameters/orgID"
+      responses:
+        "200":
+          description: LLM settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LLMSettings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updateLLMSettings
+      summary: Update LLM settings (partial merge)
+      description: |
+        Merges the request body into the existing settings. Fields
+        omitted from the body keep their previous values. Echoing the
+        masked sentinel back into `api_key` preserves the stored key —
+        round-tripping a GET response into PATCH is safe.
+      tags: [LLM Settings]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/orgID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LLMSettingsPatch"
+            example:
+              model: gpt-4o-mini
+              temperature: 0.2
+      responses:
+        "200":
+          description: Settings persisted. Response is masked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LLMSettings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteLLMSettings
+      summary: Reset LLM settings to defaults
+      description: |
+        Replaces the stored settings with the package defaults
+        (provider=ollama, model=llama3.2:3b, base_url=http://localhost:11434).
+        Idempotent — returns the defaults whether or not the org had
+        custom settings.
+      tags: [LLM Settings]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/orgID"
+      responses:
+        "200":
+          description: Settings reset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LLMSettings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+components:
+  # =========================================================================
+  # Security
+  # =========================================================================
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        API-key bearer token. The server treats both the
+        `Authorization: Bearer <token>` header and the `X-API-Key`
+        header equivalently. Tenant scope is inferred from the
+        `X-Tenant-ID` header.
+
+        Most endpoints accept anonymous calls (permissive default).
+        When `AuthConfig.ValidateAPIKey` is wired the server enforces
+        roles per endpoint:
+          - `Admin` only: cluster routes, `/v1/jobs`, admin TTL/orphan
+          - `Admin | Editor`: PATCH .../embedding-model
+          - default: every other route
+
+        Operators who want strict deny-by-default semantics must wrap
+        the chain with `OptionalAuthMiddleware` replaced by
+        `AuthMiddleware`.
+
+  # =========================================================================
+  # Parameters
+  # =========================================================================
+  parameters:
+    tenantID:
+      name: tenantID
+      in: path
+      required: true
+      description: Unique tenant identifier.
+      schema:
+        type: string
+      example: t_acme
+
+    indexID:
+      name: indexID
+      in: path
+      required: true
+      description: Unique index identifier within the tenant.
+      schema:
+        type: string
+      example: i_codebase
+
+    docID:
+      name: docID
+      in: path
+      required: true
+      description: Integer document identifier.
+      schema:
+        type: integer
+      example: 0
+
+    chunkID:
+      name: chunkID
+      in: path
+      required: true
+      description: Integer chunk identifier.
+      schema:
+        type: integer
+      example: 0
+
+    orgID:
+      name: orgID
+      in: path
+      required: true
+      description: Organization identifier.
+      schema:
+        type: string
+      example: org-acme
+
+    userID:
+      name: userID
+      in: path
+      required: true
+      description: User identifier within the org.
+      schema:
+        type: string
+      example: user-42
+
+    backupID:
+      name: backupID
+      in: path
+      required: true
+      description: |
+        Backup identifier. Percent-encoded by the client because a
+        BackupID contains slashes (it embeds the tenant, index and
+        timestamp).
+      schema:
+        type: string
+      example: "backups%2Ft_acme%2Fidx_abc123%2F20260810T120000_000000000Z"
+
+  # =========================================================================
+  # Reusable Responses
+  # =========================================================================
+  responses:
+    BadRequest:
+      description: Bad request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: bad_request
+              message: Invalid tenant ID format
+
+    ValidationError:
+      description: Validation error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: validation_error
+              message: Tenant name is required
+
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: not_found
+              message: Index not found
+
+    Unauthorized:
+      description: Authentication required.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: unauthorized
+              message: Authentication required
+
+    Forbidden:
+      description: Access denied.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: forbidden
+              message: Index does not belong to this tenant
+
+    QuotaExceeded:
+      description: Quota exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: quota_exceeded
+              message: Queries quota exceeded
+
+    IndexNotReady:
+      description: Index is not ready for queries.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: index_not_ready
+              message: Index is not ready for queries
+
+    InternalError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: internal_error
+              message: an internal error occurred
+
+    NotImplemented:
+      description: Feature not yet implemented.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: not_implemented
+              message: Index updates are not yet persisted
+
+    BackupDisabled:
+      description: |
+        Backups are not enabled on this server. The body is a flat
+        `{"error": "<message>"}` object -- NOT the standard
+        `ErrorEnvelope` -- this route bypasses the handler error
+        helpers.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+          example:
+            error: "backup not enabled; start the server with --backup-dir"
+
+  # =========================================================================
+  # Schemas
+  # =========================================================================
+  schemas:
+    # -- Error envelope ----------------------------------------------------
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/APIError"
+
+    APIError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code.
+          enum:
+            - internal_error
+            - bad_request
+            - unauthorized
+            - forbidden
+            - not_found
+            - conflict
+            - quota_exceeded
+            - rate_limited
+            - validation_error
+            - index_not_ready
+            - index_building
+            - service_unavailable
+            - payload_too_large
+            - not_implemented
+        message:
+          type: string
+          description: Human-readable error message.
+        details:
+          description: Optional structured details about the error.
+
+    # -- Health ------------------------------------------------------------
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy]
+
+    ReadyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not ready]
+        reason:
+          type: string
+          description: Reason when not ready.
+
+    # -- Tenants -----------------------------------------------------------
+    CreateTenantRequest:
+      type: object
+      required: [name]
+      properties:
+        id:
+          type: string
+          description: Optional custom tenant ID for deterministic creation (idempotent).
+        name:
+          type: string
+          description: Human-readable tenant name.
+
+    TenantResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TenantDetailResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TenantListEntry:
+      type: object
+      description: |
+        One element of the tenant listing. This is NOT TenantDetailResponse:
+        the listing enriches each tenant with `index_count` so admin UIs
+        avoid one request per tenant, and includes the sanitized metadata
+        map. GET /v1/tenants/{tenantID} sends neither field.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        index_count:
+          type: integer
+          description: |
+            Number of indexes owned by this tenant. Best-effort: a failed
+            lookup reports 0 for that tenant rather than failing the listing.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Operator-set tenant metadata, with any embedded credentials
+            masked. Absent when the tenant has none.
+
+    ListTenantsResponse:
+      type: object
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantListEntry"
+        total:
+          type: integer
+
+    # -- Indexes -----------------------------------------------------------
+    Compression:
+      type: string
+      description: |
+        On-disk compression mode for index embeddings. Determines how
+        compaction persists per-vector data and consequently the storage
+        footprint and search-time behavior.
+
+        - `scalar`: scalar-quantized codes.
+        - `binary`: binary-quantized codes.
+        - `pq`: product-quantized codes.
+        - `recompute`: recomputes embeddings from stored chunk text.
+
+        The internal legacy `none` mode is not selectable through this API.
+
+        Empty string defers to the server's `--default-compression` flag
+        (default: `recompute`).
+
+        See `docs/COMPRESSION.md` for trade-offs, scale-dependent storage
+        math, and the migration playbook.
+      enum:
+        - ""
+        - "scalar"
+        - "binary"
+        - "pq"
+        - "recompute"
+
+    CreateIndexRequest:
+      type: object
+      required: [name]
+      properties:
+        id:
+          type: string
+          description: Optional custom index ID for deterministic creation (idempotent).
+        name:
+          type: string
+          description: Human-readable index name.
+        description:
+          type: string
+          description: Optional description.
+        compression:
+          $ref: "#/components/schemas/Compression"
+          description: |
+            Compression mode for the new index. Optional; when omitted the
+            server's `--default-compression` value is used. Once set,
+            controls the on-disk format produced by every subsequent
+            compaction. To change mode after creation use the offline
+            `graphann recompact` CLI tool.
+        approximate:
+          type: boolean
+          description: |
+            If true, skip the exact rerank step during PQ-mode search
+            (TwoLevelSearcher.RerankRatio = 0). Recall drops ~1-2%;
+            latency drops 10-50x on the rerank-bound path. No-op for
+            non-PQ compression modes (`recompute`, `none`, `scalar`,
+            `binary`) — those have no rerank step to skip. Defaults to
+            false. See `docs/COMPRESSION.md` § "Approximate-only mode".
+
+    UpdateIndexRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: New index name.
+        description:
+          type: string
+          description: New description.
+        approximate:
+          type: boolean
+          description: |
+            When true, enables approximate-only PQ-mode search: the exact
+            rerank step is skipped (TwoLevelSearcher.RerankRatio = 0).
+            Recall drops ~1-2%; latency drops 10-50x on the rerank-bound
+            path. No-op for non-PQ compression modes. Change propagates to
+            a loaded LiveIndex immediately — no restart required.
+        compression:
+          type: string
+          enum: ["", scalar, binary, pq, recompute]
+          description: |
+            Advisory compression preference for the next compaction. Updating
+            this field does NOT migrate existing on-disk data — it only sets
+            the mode that LiveIndex.Compact will use the next time it runs.
+            To migrate existing data immediately, run `graphann recompact`
+            offline or trigger a manual compaction.
+        embedding_backend:
+          type: string
+          enum: ["", ollama, openai]
+          description: |
+            Per-index embedding backend override. Remote backends only --
+            per-index local_onnx instances are deliberately unsupported;
+            use the process embedder for local models. Setting this to ""
+            clears the override back to the process-wide embedder.
+        embedding_model:
+          type: string
+          description: |
+            Backend model identifier (e.g. "text-embedding-3-small",
+            "intfloat/multilingual-e5-small"). e5-family models get the
+            query:/passage: intent prefixes applied automatically by the
+            openai backend preset.
+        embedding_endpoint:
+          type: string
+          description: |
+            Optional override of the backend base URL. SSRF-validated at
+            PATCH time (public http/https hosts only) and re-guarded at
+            connect time, so it cannot point at loopback/RFC1918/metadata
+            ranges.
+        embedding_dimension:
+          type: integer
+          description: Expected output dimension for the per-index embedding override.
+        embedding_api_key_env:
+          type: string
+          description: |
+            ENV VAR NAME holding the backend key -- never send the key
+            itself in this field.
+
+    IndexInfo:
+      type: object
+      description: Full index metadata as stored by the tenant manager.
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [pending, building, ready, error, deleted]
+        error:
+          type: string
+        num_docs:
+          type: integer
+        num_chunks:
+          type: integer
+        dimension:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_compacted_at:
+          type: string
+          format: date-time
+          description: |
+            Wall-clock time of the most recent successful compaction.
+            Absent when the index has never been compacted (either
+            genuinely fresh, or compacted before this field existed --
+            callers fall back to `created_at` in that case).
+        created_by:
+          type: string
+          description: User ID of the index's creator, if known.
+        path:
+          type: string
+          description: On-disk directory the index is stored under.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Arbitrary operator-set key/value metadata for this index.
+        compression:
+          $ref: "#/components/schemas/Compression"
+          description: |
+            Currently configured compression mode. Reflects the value set at
+            creation time (or the server default when the request omitted it).
+            Empty string indicates a legacy index that predates this field; it
+            will adopt the server default at the next compaction.
+        approximate:
+          type: boolean
+          description: |
+            True when this index is in approximate-only mode: PQ-mode search
+            skips the exact rerank step. See `CreateIndexRequest.approximate`
+            for the full contract. Always false for non-PQ indexes.
+        vectors_external:
+          type: boolean
+          description: |
+            True once the index has ingested at least one client-supplied
+            (precomputed) vector -- meaning the stored vectors/codes live
+            in the CLIENT's embedding space, not the server embedder's.
+            Once set, compacted search paths rank candidates in the
+            index's own code space and never re-embed candidate texts for
+            reranking.
+        embedding_backend:
+          type: string
+          description: |
+            Per-index embedding backend override, if configured. Empty
+            for the default (process-wide embedder). See
+            `UpdateIndexRequest.embedding_backend`.
+        embedding_model:
+          type: string
+          description: Per-index embedding model identifier, if `embedding_backend` is set.
+        embedding_endpoint:
+          type: string
+          description: Per-index embedding backend base URL override, if set.
+        embedding_dimension:
+          type: integer
+          description: Expected output dimension for the per-index embedding override, if set.
+        embedding_api_key_env:
+          type: string
+          description: ENV VAR NAME holding the per-index embedding backend key, if set.
+
+    IndexStatusResponse:
+      type: object
+      description: |
+        Status of one index, including its embedding-space observability
+        state. The shape is identical whether the index is loaded or cold --
+        a cold answer is peeked from the on-disk header, so a status query
+        never loads an index.
+      properties:
+        index_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, building, ready, error, deleted]
+        error:
+          type: string
+        embed_space_state:
+          type: string
+          enum:
+            - unknown
+            - verified
+            - mismatch
+            - external_unverified
+            - external_agree
+            - external_diverged
+          description: Embedding-space classification of this index.
+        embed_fingerprint:
+          type: string
+          description: The index's own stored embedding fingerprint.
+        server_embed_fingerprint:
+          type: string
+          description: Fingerprint of the embedder this server is currently serving with.
+        embed_space_policy:
+          type: string
+          enum: [warn, refuse_search, refuse_open]
+          description: |
+            Mismatch policy in force for THIS index, i.e. the global policy
+            after any per-index allow-list override.
+        embed_space_detail:
+          type: string
+          description: Human-readable detail for the state. Empty string when there is none.
+        embed_space_checked_at:
+          type: string
+          format: date-time
+          description: When the state was last resolved. Absent if never checked.
+
+    ListIndexesResponse:
+      type: object
+      properties:
+        indexes:
+          type: array
+          items:
+            $ref: "#/components/schemas/IndexInfo"
+        total:
+          type: integer
+
+    # -- Documents ---------------------------------------------------------
+    Document:
+      type: object
+      description: |
+        A document to add to an index. The text content can be supplied in
+        either `text` or `content` -- `content` is an alias for `text`.
+      properties:
+        id:
+          type: string
+          description: Optional custom document ID.
+        text:
+          type: string
+          description: Document text content.
+        content:
+          type: string
+          description: Alias for `text`. If both are provided, `text` takes precedence.
+        metadata:
+          description: Arbitrary metadata attached to the document.
+        repo_id:
+          type: string
+          description: Repository ID for RBAC filtering.
+        file_path:
+          type: string
+          description: File path within the repository.
+        commit_sha:
+          type: string
+          description: Git commit SHA.
+        upsert:
+          type: boolean
+          description: |
+            When true, existing chunks with the same external ID are
+            deleted before this document is queued, making ingest
+            idempotent by key. Replaces the semantic
+            DeleteByQuery-then-Import pattern for clients that want
+            replace-on-reimport semantics.
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            Optional RFC3339 timestamp after which this document's
+            chunks are hidden from search and eligible for GC. Absent
+            means never.
+        vector:
+          type: array
+          items:
+            type: number
+            format: float
+          description: |
+            Optional precomputed embedding. When every document in the
+            request carries a vector, ingest skips internal embedding
+            and inserts the vectors directly.
+        vector_b64:
+          type: string
+          description: |
+            The same embedding as `vector`, base64-encoded little-endian
+            float32 (numpy `astype('<f4').tobytes()` /
+            `binary.LittleEndian`). An alternative to `vector` for bulk
+            loads that is cheaper to decode. Set one or the other, never
+            both.
+
+    UpsertResourceRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: Full text content for this resource version.
+        external_id:
+          type: string
+          description: Optional stable external ID (e.g. document UUID). Passed through to chunk metadata.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Optional key/value metadata attached to all chunks.
+        repo_id:
+          type: string
+        file_path:
+          type: string
+        commit_sha:
+          type: string
+        source_type:
+          type: string
+        owner_user_id:
+          type: string
+        title:
+          type: string
+        url:
+          type: string
+
+    UpsertResourceResponse:
+      type: object
+      properties:
+        resource_id:
+          type: string
+          description: The resource ID that was upserted.
+        index_id:
+          type: string
+        chunks_added:
+          type: integer
+          description: Number of new chunks created.
+        chunks_tombstoned:
+          type: integer
+          description: Number of previously-live chunks now tombstoned (reclaimed at next compaction).
+        operation:
+          type: string
+          enum: [create, update]
+          description: "`create` when no prior chunks existed; `update` when old chunks were tombstoned."
+
+    AddDocumentsRequest:
+      type: object
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+          minItems: 1
+        defer_save:
+          type: boolean
+          default: false
+          description: |
+            Skips the per-batch full-delta save during a bulk load: data
+            stays in memory (index marked dirty) and is persisted once
+            the caller POSTs to `.../flush`. Avoids an O(N^2) full-delta
+            re-save on every ingest request. Also settable via the
+            `?defer_save=true` query param. Default false preserves the
+            per-batch save behavior.
+        bulk:
+          type: boolean
+          default: false
+          description: |
+            Enables bulk-ingest mode: in addition to deferring the
+            per-batch save (`bulk` implies `defer_save`), the per-node
+            HNSW graph insert is deferred and the delta graph is built
+            once, concurrently, when the caller POSTs to `.../flush`.
+            The fast path for large loads. IMPORTANT: bulk-ingested data
+            is NOT searchable until `.../flush` builds the graph. Also
+            settable via the `?bulk=true` query param. Default false
+            preserves the immediately-searchable per-node insert
+            behavior.
+
+    AddDocumentsResponse:
+      type: object
+      properties:
+        added:
+          type: integer
+          description: Number of documents added.
+        index_id:
+          type: string
+        chunk_ids:
+          type: array
+          items:
+            type: string
+          description: |
+            IDs of created chunks. These are store.ChunkID values, which are
+            STRINGS -- earlier revisions of this document typed them as
+            integers, which no server has ever sent.
+        external_ids:
+          type: array
+          items:
+            type: string
+          description: |
+            Present only when the server minted external IDs during this
+            ingest. A sharded index requires an external ID per document (it
+            is the routing key), so documents that arrive without one are
+            given one; this returns the durable IDs. Absent entirely for
+            unsharded ingests and for sharded ingests where the client
+            supplied every ID.
+
+    GetDocumentChunk:
+      type: object
+      description: |
+        One chunk of a retrieved document. NOT ChunkResponse: this carries
+        `uuid` plus the RBAC/source fields and omits `document_id`, which the
+        enclosing GetDocumentResponse states once.
+      properties:
+        chunk_id:
+          type: integer
+        uuid:
+          type: string
+        text:
+          type: string
+        chunk_index:
+          type: integer
+        start:
+          type: integer
+          description: Start byte offset in the original document.
+        end:
+          type: integer
+          description: End byte offset in the original document.
+        repo_id:
+          type: string
+        file_path:
+          type: string
+        commit_sha:
+          type: string
+
+    GetDocumentResponse:
+      type: object
+      description: Every non-deleted chunk of a document, ordered by chunk_index.
+      properties:
+        index_id:
+          type: string
+        document_id:
+          type: integer
+        external_id:
+          type: string
+          description: Taken from the first chunk; every chunk of a document shares it.
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/GetDocumentChunk"
+        total_chunks:
+          type: integer
+
+    DeleteDocumentResponse:
+      type: object
+      properties:
+        deleted_chunks:
+          type: integer
+        document_id:
+          type: integer
+        index_id:
+          type: string
+
+    BulkDeleteDocumentsRequest:
+      type: object
+      required: [document_ids]
+      properties:
+        document_ids:
+          type: array
+          items:
+            type: integer
+          minItems: 1
+
+    BulkDeleteDocumentsResponse:
+      type: object
+      properties:
+        index_id:
+          type: string
+        documents_deleted:
+          type: integer
+        chunks_deleted:
+          type: integer
+        deleted_per_doc:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Map of document ID to number of chunks deleted.
+
+    BulkDeleteByExternalIDsRequest:
+      type: object
+      required: [external_ids]
+      properties:
+        external_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Client-provided external IDs to delete.
+
+    BulkDeleteByExternalIDsResponse:
+      type: object
+      properties:
+        index_id:
+          type: string
+        documents_deleted:
+          type: integer
+        chunks_deleted:
+          type: integer
+        deleted_per_id:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Map of external ID to number of chunks deleted.
+
+    # -- Chunks ------------------------------------------------------------
+    ChunkResponse:
+      type: object
+      properties:
+        chunk_id:
+          type: integer
+        text:
+          type: string
+        document_id:
+          type: integer
+        chunk_index:
+          type: integer
+        start:
+          type: integer
+          description: Start byte offset in the original document.
+        end:
+          type: integer
+          description: End byte offset in the original document.
+
+    DeleteChunksRequest:
+      type: object
+      required: [chunk_ids]
+      properties:
+        chunk_ids:
+          type: array
+          items:
+            type: integer
+          minItems: 1
+
+    DeleteChunksResponse:
+      type: object
+      properties:
+        deleted:
+          type: integer
+        index_id:
+          type: string
+
+    # -- Search ------------------------------------------------------------
+    SearchFilter:
+      type: object
+      properties:
+        repo_ids:
+          type: array
+          items:
+            type: string
+          description: |
+            Filter results to only include chunks from these repository IDs.
+            If empty, no filtering is applied.
+        equals:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Generic field-equality filter over ChunkMetadata fields. Every
+            entry must match for a chunk to pass (AND semantics). An empty
+            or absent map matches all chunks. An unknown key excludes all
+            chunks (defensive default).
+
+            Supported keys: author, author_email, title, url, content_type,
+            content_id, thread_id, source_type, source_id, source_name,
+            connector_id, repo_id, file_path, commit_sha, owner_user_id,
+            resource_id, external_id, shared ("true"/"false"),
+            document_id (decimal string).
+          example:
+            author: "alice"
+            content_type: "email"
+        omit_text:
+          type: boolean
+          default: false
+          description: |
+            Drops the chunk text from every result. Off by default, so
+            an existing client sees exactly what it saw before. Worth
+            setting for a caller that already holds the text -- a RAG
+            pipeline reading from its own store, or a reranking stage
+            keyed on ids. At k=10, text is 75% of the response body;
+            skipping it also skips the per-result zstd decompression of
+            the chunk text store, not just the bytes on the wire.
+        exclude_external_ids:
+          type: array
+          items:
+            type: string
+          description: |
+            Removes chunks whose external ID is in this list. Use case:
+            strip well-known synthetic docs (e.g. "__seed__") from
+            results.
+        metadata_filter:
+          type: object
+          additionalProperties: true
+          description: |
+            Requires each key/value to match the chunk's sidecar
+            metadata exactly. Keys absent from the chunk's sidecar fail
+            the filter. Empty/absent map disables this filter.
+
+    SearchRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Text query for semantic search.
+        vector:
+          type: array
+          items:
+            type: number
+            format: float
+          description: |
+            Raw embedding vector for nearest-neighbor search. Mutually
+            exclusive with `vector_b64` -- set one or the other, never
+            both.
+        vector_b64:
+          type: string
+          description: |
+            The query vector as base64-encoded little-endian float32,
+            the same encoding accepted on ingest -- an alternative to
+            `vector` that is cheaper to decode (query JSON decoding
+            measured at 17.5% of server CPU under load). Mutually
+            exclusive with `vector` -- set one or the other, never both.
+        k:
+          type: integer
+          default: 10
+          description: Maximum number of results to return.
+        filter:
+          $ref: "#/components/schemas/SearchFilter"
+        rerank:
+          type: boolean
+          default: false
+          description: |
+            When true, rescore the top-`candidate_k` HNSW candidates with the
+            server-configured cross-encoder reranker and return the top-`rerank_k`
+            (or top-`k` if `rerank_k` is unset) by reranker score. Silently no-op
+            when the server has no reranker configured (`--reranker-url` unset),
+            so flipping this on a non-rerank-aware deployment is safe.
+
+            Reranking only applies to the text-`query` path. Vector-only
+            requests ignore this flag (no text query to feed the cross-encoder).
+        candidate_k:
+          type: integer
+          description: |
+            Size of the first-stage candidate pool fed to the reranker. Effective
+            only when `rerank=true`. Defaults to `max(4*k, 50)`. Server clamps to
+            `[k, 1000]`.
+        rerank_k:
+          type: integer
+          description: |
+            Number of results to return AFTER reranking. Effective only when
+            `rerank=true`. Defaults to `k`.
+        ef_search:
+          type: integer
+          description: |
+            Per-query HNSW search breadth (candidate list size). 0 (the
+            default) uses the server default. Clamped to a maximum of
+            2000.
+        hybrid:
+          type: boolean
+          default: false
+          description: |
+            Fuses the dense (semantic) results with a BM25 lexical
+            ranking via Reciprocal Rank Fusion (RRF), so rare-token /
+            keyword matches surface alongside semantic ones. Applies to
+            text `query` searches only -- ignored for vector-only
+            requests. Default false = dense-only. Safe to flip: falls
+            back to dense-only results if the lexical index can't be
+            built.
+
+    SearchResult:
+      type: object
+      properties:
+        id:
+          type: string
+          description: |
+            Document identifier. Returns the client-provided external ID
+            when available, otherwise falls back to the integer chunk index
+            formatted as a string.
+        text:
+          type: string
+        score:
+          type: number
+          format: float
+          description: |
+            First-stage cosine similarity (higher is better). Always
+            populated, regardless of whether reranking ran. Clients can
+            rely on this single scale across rerank and non-rerank
+            requests.
+        rerank_score:
+          type: number
+          format: float
+          description: |
+            Cross-encoder relevance score, in the reranker's native
+            scale (typically roughly -10 to 10 for bge-reranker-v2-m3).
+            Present only when the request set `rerank=true` AND the
+            server applied the reranker successfully. Absent when the
+            server has no reranker, the request didn't ask for rerank,
+            or the reranker errored and the server fell back to
+            first-stage results. Clients that want the post-rerank
+            order should sort by `rerank_score` when present and fall
+            back to `score` otherwise.
+        metadata:
+          type: object
+          description: Chunk metadata merged with arbitrary user metadata.
+          additionalProperties: {}
+          properties:
+            document_id:
+              type: integer
+              description: Internal document ID.
+            chunk_index:
+              type: integer
+              description: Chunk index within the document.
+            repo_id:
+              type: string
+              description: Repository ID for RBAC filtering.
+            file_path:
+              type: string
+              description: File path within the repository.
+            commit_sha:
+              type: string
+              description: Git commit SHA.
+
+    SearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResult"
+        total:
+          type: integer
+
+        partial:
+          type: boolean
+          description: Whether one or more shards did not return complete results.
+        shards_total:
+          type: integer
+          description: Total shards targeted by a sharded search.
+        shards_ok:
+          type: integer
+          description: Shards that returned complete results.
+        degraded_shards:
+          type: array
+          items:
+            type: string
+          description: Identifiers of degraded shards, when present.
+        rerank_applied:
+          type: boolean
+          description: Whether the server applied reranking. May be absent on older servers or when reranking was not requested.
+    # -- Index Maintenance -------------------------------------------------
+    CompactResponse:
+      type: object
+      properties:
+        index_id:
+          type: string
+        status:
+          type: string
+          enum: [compacting]
+          description: |
+            Always `compacting`, never `compacted`: compaction runs in the
+            background and nothing has been merged when this returns. Track
+            completion via GET /v1/jobs.
+        message:
+          type: string
+
+    ClearResponse:
+      type: object
+      properties:
+        index_id:
+          type: string
+        status:
+          type: string
+          enum: [cleared]
+        message:
+          type: string
+
+    LiveStatsResponse:
+      type: object
+      description: |
+        When `is_live` is true, detailed live index stats are returned.
+        When false, only basic metadata from disk is included.
+      properties:
+        index_id:
+          type: string
+        is_live:
+          type: boolean
+          description: Whether the index is currently loaded in memory.
+        dimension:
+          type: integer
+          description: Embedding dimension (present in both live and non-live responses).
+        # Fields when is_live=true
+        base_chunks:
+          type: integer
+          description: Number of chunks in the compacted base graph.
+        delta_chunks:
+          type: integer
+          description: Number of chunks in the uncompacted delta layer.
+        frozen_chunks:
+          type: integer
+          description: >-
+            Chunks rotated out of the active delta and not yet folded
+            into the new base by an in-flight compaction (delta-A).
+            Already counted in total_chunks/live_chunks so those totals
+            don't visibly drop during a compaction window; reported
+            separately so delta_chunks keeps its established meaning
+            (active delta-B only). Always 0 in the not-loaded fallback.
+        total_chunks:
+          type: integer
+          description: Total chunks (base + delta).
+        deleted_chunks:
+          type: integer
+          description: Number of deleted chunks.
+        live_chunks:
+          type: integer
+          description: Active chunks (total - deleted).
+        documents:
+          type: integer
+          description: Number of documents.
+        is_dirty:
+          type: boolean
+          description: Whether the delta layer has uncompacted changes.
+        # Storage-savings counters (live responses; 0/absent-of-disk in the fallback)
+        base_bytes:
+          type: integer
+          format: int64
+          description: On-disk size of the compacted base index directory.
+        delta_bytes:
+          type: integer
+          format: int64
+          description: On-disk size of the uncompacted delta layer files.
+        embedding_sidecar_bytes:
+          type: integer
+          format: int64
+          description: >-
+            On-disk size of embedding-derived files kept in the index
+            (quantized codes/models, PCA, hub cache).
+        raw_bytes:
+          type: integer
+          format: int64
+          description: >-
+            Uncompressed baseline: what the live chunks' embeddings would weigh
+            as full float32 (live_chunks * dimension * 4). Pair with
+            index_size_bytes for the storage-savings ratio.
+        index_size_bytes:
+          type: integer
+          format: int64
+          description: >-
+            Persisted on-disk index size (base_bytes + delta_bytes). 0 in the
+            not-loaded fallback where a disk walk isn't performed.
+        compression_ratio:
+          type: number
+          format: float
+          description: >-
+            raw_bytes / index_size_bytes (how many times smaller the index is
+            than the raw float32 vectors). 0 before anything is persisted.
+        base_deleted_chunks:
+          type: integer
+          description: >-
+            Rebuild advisory (live responses only): number of tombstoned
+            chunks in the compacted base. Always 0 in the not-loaded
+            fallback.
+        base_deleted_fraction:
+          type: number
+          format: float
+          description: >-
+            Rebuild advisory: fraction of the compacted base that is
+            tombstoned (base_deleted_chunks / base size). Always 0 in the
+            not-loaded fallback.
+        rebuild_recommended:
+          type: boolean
+          description: >-
+            Rebuild advisory: true when base_deleted_fraction exceeds the
+            ~5% threshold. Advisory only -- the server never auto-compacts
+            on it. Always false in the not-loaded fallback.
+        # Fields when is_live=false
+        num_chunks:
+          type: integer
+          description: Stored chunk count (from metadata).
+        num_docs:
+          type: integer
+          description: Stored document count (from metadata).
+
+    # -- Batch Import ------------------------------------------------------
+    ImportDocumentsRequest:
+      type: object
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+          minItems: 1
+
+    ImportDocumentsResponse:
+      type: object
+      properties:
+        imported:
+          type: integer
+        document_ids:
+          type: array
+          items:
+            type: integer
+        index_id:
+          type: string
+        pending_total:
+          type: integer
+        status:
+          type: string
+          enum: [processing]
+        message:
+          type: string
+
+    PendingStatusResponse:
+      type: object
+      properties:
+        index_id:
+          type: string
+        pending_count:
+          type: integer
+
+    ProcessPendingResponse:
+      type: object
+      properties:
+        index_id:
+          type: string
+        processed:
+          type: integer
+        chunks_created:
+          type: integer
+        chunk_ids:
+          type: array
+          items:
+            type: string
+          description: store.ChunkID values -- strings, as in AddDocumentsResponse.
+
+    ClearPendingResponse:
+      type: object
+      properties:
+        index_id:
+          type: string
+        status:
+          type: string
+          enum: [cleared]
+        message:
+          type: string
+
+    # -- Org Sync ----------------------------------------------------------
+    SyncDocumentInput:
+      type: object
+      properties:
+        resource_id:
+          type: string
+          description: |
+            Deduplication key. Required when `shared` is true.
+        text:
+          type: string
+          description: Document text content.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Key-value metadata. Recognized keys include: `repo_id`,
+            `file_path`, `commit_sha`, `title`, `author`, `url`,
+            `resource_type`, `created_at` (RFC3339), `author_email`,
+            `source_id`, `source_name`, `connector_id`, `content_id`,
+            `content_type`, `thread_id`.
+
+    SyncDocumentsRequest:
+      type: object
+      required: [user_id, source_type, documents]
+      properties:
+        user_id:
+          type: string
+          description: ID of the user performing the sync.
+        source_type:
+          type: string
+          description: |
+            Integration source type (e.g. `github`, `confluence`, `slack`,
+            `gmail`, `gdocs`).
+        shared:
+          type: boolean
+          default: false
+          description: |
+            When true, documents are added to a shared org-level index with
+            deduplication by `resource_id`. When false, documents go to the
+            user's personal index.
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncDocumentInput"
+          minItems: 1
+
+    SyncDocumentsResponse:
+      type: object
+      properties:
+        synced:
+          type: integer
+        org_id:
+          type: string
+        user_id:
+          type: string
+        source_type:
+          type: string
+        index_type:
+          type: string
+          enum: [personal, shared]
+
+    # -- Org Search --------------------------------------------------------
+    MultiSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          description: Text query for semantic search.
+        k:
+          type: integer
+          default: 0
+          description: |
+            Maximum results. 0 (default) returns all relevant results with
+            no limit.
+        max_results:
+          type: integer
+          deprecated: true
+          description: "Deprecated: use `k` instead."
+        sources:
+          type: array
+          items:
+            type: string
+          description: |
+            Filter by source types (e.g. `["github", "slack"]`). Empty
+            searches all discovered sources.
+        ef_search:
+          type: integer
+          default: 500
+          description: Search expansion factor for HNSW traversal.
+        include_text:
+          type: boolean
+          default: false
+          description: Include chunk text content in results.
+        start_time:
+          type: integer
+          format: int64
+          description: Unix timestamp -- only return results created after this time.
+        end_time:
+          type: integer
+          format: int64
+          description: Unix timestamp -- only return results created before this time.
+        distance_threshold:
+          type: number
+          format: float
+          default: 0.5
+          description: |
+            Maximum cosine distance for results. Lower values mean stricter
+            matching (0 = perfect match, 1 = orthogonal). Values less than or
+            equal to zero are treated as the default (0.5).
+
+    MultiSearchResult:
+      type: object
+      properties:
+        chunk_id:
+          type: integer
+        text:
+          type: string
+          description: Chunk text (only when `include_text` is true).
+        distance:
+          type: number
+          format: float
+          description: Cosine distance from query (lower is better).
+        source_type:
+          type: string
+        repo_id:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Metadata fields such as `file_path`, `commit_sha`, `title`,
+            `url`, `author_name`, `author_email`, `source_id`,
+            `source_name`, `connector_id`, `content_id`, `content_type`,
+            `thread_id`, `resource_id`, `owner_user_id`.
+        created_at:
+          type: integer
+          format: int64
+          description: Unix timestamp when the content was created.
+        shared:
+          type: boolean
+          description: Whether this result is from a shared index.
+
+    MultiSearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/MultiSearchResult"
+        total:
+          type: integer
+        query:
+          type: string
+        org_id:
+          type: string
+        user_id:
+          type: string
+
+    # -- Org Indexes -------------------------------------------------------
+    OrgIndexListResponse:
+      type: object
+      properties:
+        indexes:
+          type: array
+          items:
+            $ref: "#/components/schemas/IndexInfo"
+        total:
+          type: integer
+        org_id:
+          type: string
+        user_id:
+          type: string
+
+    SharedIndexListResponse:
+      type: object
+      properties:
+        indexes:
+          type: array
+          items:
+            $ref: "#/components/schemas/IndexInfo"
+        total:
+          type: integer
+        org_id:
+          type: string
+
+    # -- Tenant deletion --------------------------------------------------
+    DeleteTenantResponse:
+      type: object
+      properties:
+        deleted:
+          type: boolean
+          enum: [true]
+        tenant_id:
+          type: string
+        name:
+          type: string
+
+    # -- Embedding model hot swap ----------------------------------------
+    SwitchEmbeddingModelRequest:
+      type: object
+      required: [embedding_backend, model, dimension]
+      properties:
+        embedding_backend:
+          type: string
+          enum: [ollama, openai, local_onnx]
+          description: |
+            Destination embedding backend. The HTTP API intentionally
+            rejects `mock` — it is CLI-only.
+        model:
+          type: string
+          description: Destination model identifier.
+          maxLength: 256
+          pattern: "^[A-Za-z0-9._:/\\-]{1,256}$"
+        dimension:
+          type: integer
+          minimum: 1
+          maximum: 8192
+          description: Expected output dimension for the destination model.
+        endpoint_override:
+          type: string
+          description: |
+            Optional URL (ollama / openai) or filesystem path
+            (local_onnx) to override the default endpoint. Endpoints
+            with shell metacharacters are rejected.
+        api_key:
+          type: string
+          description: |
+            Optional API key for the destination backend. Carried in
+            memory only — never echoed back in the job JSON.
+
+    SwitchEmbeddingModelResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [queued]
+
+    # -- Jobs --------------------------------------------------------------
+    JobProgress:
+      type: object
+      properties:
+        chunks_done:
+          type: integer
+        chunks_total:
+          type: integer
+
+    Job:
+      type: object
+      description: |
+        Public view of an async job. The internal `Params.APIKey` is
+        never serialized.
+      properties:
+        job_id:
+          type: string
+        kind:
+          type: string
+          enum: [reembed]
+        tenant_id:
+          type: string
+        index_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed]
+        progress:
+          $ref: "#/components/schemas/JobProgress"
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+
+    JobListResponse:
+      type: object
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        total:
+          type: integer
+        next_cursor:
+          type: string
+          description: Cursor to pass back as `?cursor=` for the next page.
+
+    # -- TTL GC + Orphan cleanup ------------------------------------------
+    GCResponse:
+      type: object
+      description: |
+        Body of `POST /v1/tenants/{tenantID}/indexes/{indexID}/gc`, written by
+        IncrementalHandlers.RunGC.
+      required: [index_id, deleted_count]
+      properties:
+        index_id:
+          type: string
+        deleted_count:
+          type: integer
+          description: Number of expired documents deleted by the sweep.
+
+    AdminGCResponse:
+      type: object
+      description: |
+        Body of `POST /v1/admin/gc`, written by IncrementalHandlers.RunGCAll.
+        Reports the total across every loaded index; there is no per-index
+        breakdown and no count of indexes swept.
+      required: [deleted_count]
+      properties:
+        deleted_count:
+          type: integer
+          description: Total expired documents deleted across all loaded indexes.
+
+    AdminCleanupResponse:
+      type: object
+      description: |
+        Body of `POST /v1/admin/cleanup-orphans`. `min_age` and `dry_run` echo
+        the values the server actually applied, so a caller can confirm which
+        cutoff was used. When `dry_run` is true, `removed` lists what *would*
+        have been removed and nothing is deleted.
+      required: [removed, freed_bytes, min_age, dry_run]
+      properties:
+        removed:
+          type: array
+          items:
+            type: string
+          description: Absolute paths removed (or, under dry_run, that would be removed).
+        freed_bytes:
+          type: integer
+          format: int64
+        min_age:
+          type: string
+          description: Minimum-age cutoff actually applied, as a Go duration string.
+          example: "1h"
+        dry_run:
+          type: boolean
+          description: Echoes whether the sweep was a dry run.
+
+    # -- Cluster ----------------------------------------------------------
+    ClusterNodeView:
+      type: object
+      properties:
+        id:
+          type: string
+        addr:
+          type: string
+        zone:
+          type: string
+        state:
+          type: string
+          enum: [alive, suspect, dead]
+        last_seen:
+          type: string
+          format: date-time
+
+    ClusterShardView:
+      type: object
+      properties:
+        id:
+          type: string
+        primary:
+          type: string
+        replicas:
+          type: array
+          items:
+            type: string
+        zone_placement:
+          type: object
+          additionalProperties:
+            type: string
+
+    ListClusterNodesResponse:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodeView"
+        leader:
+          type: string
+
+    ListClusterShardsResponse:
+      type: object
+      properties:
+        shards:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterShardView"
+        rf:
+          type: integer
+          description: Configured replication factor.
+
+    ClusterHealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, unhealthy]
+        cluster_size:
+          type: integer
+        alive_nodes:
+          type: integer
+        raft_has_leader:
+          type: boolean
+        under_replicated_shards:
+          type: integer
+
+    # -- API Keys ----------------------------------------------------------
+    CreateAPIKeyRequest:
+      type: object
+      required: [user_id, name]
+      properties:
+        user_id:
+          type: string
+          description: Owning user ID. Must already exist inside the tenant.
+        name:
+          type: string
+          description: Human-readable label stored alongside the key.
+
+    CreateAPIKeyResponse:
+      type: object
+      required: [id, name, user_id, plaintext, created_at]
+      properties:
+        id:
+          type: string
+          description: Stable key identifier (e.g. `k_abc123`).
+        name:
+          type: string
+        user_id:
+          type: string
+        plaintext:
+          type: string
+          description: |
+            The plaintext API token. RETURNED EXACTLY ONCE. The server
+            stores only the argon2id hash; losing this value requires
+            rotating the key.
+        created_at:
+          type: string
+          format: date-time
+
+    APIKeyListItem:
+      type: object
+      required: [id, user_id, name, created_at]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          description: Set when the key has been validated at least once.
+
+    ListAPIKeysResponse:
+      type: object
+      required: [api_keys]
+      properties:
+        api_keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIKeyListItem"
+
+    # -- LLM Settings ------------------------------------------------------
+    LLMSettings:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [openai, ollama, anthropic]
+        model:
+          type: string
+        api_key:
+          type: string
+          description: |
+            On read this field is masked (`***` + last four characters).
+            On write a masked sentinel preserves the existing key.
+        base_url:
+          type: string
+          description: Optional base URL override. SSRF-validated server-side.
+        temperature:
+          type: number
+          format: float
+        max_tokens:
+          type: integer
+
+    LLMSettingsPatch:
+      type: object
+      description: |
+        Partial update body. Only the fields present here are applied;
+        absent fields keep their previous values. Echoing the masked
+        `api_key` value preserves the stored secret.
+      properties:
+        provider:
+          type: string
+          enum: [openai, ollama, anthropic]
+        model:
+          type: string
+        api_key:
+          type: string
+        base_url:
+          type: string
+        temperature:
+          type: number
+          format: float
+        max_tokens:
+          type: integer
+
+    # -- License -------------------------------------------------------------
+    LicenseEntitlements:
+      type: object
+      properties:
+        max_tenants:
+          type: integer
+          format: int64
+        max_memory_bytes:
+          type: integer
+          format: int64
+        max_cpu:
+          type: integer
+        max_disk_bytes:
+          type: integer
+          format: int64
+
+    LicenseStatus:
+      type: object
+      description: Snapshot of this node's current license state.
+      properties:
+        state:
+          type: string
+          enum: [unlicensed, active, grace, expired, mismatch]
+        license_id:
+          type: string
+        not_after:
+          type: integer
+          format: int64
+          description: Unix timestamp the license expires, if bound.
+        entitlements:
+          $ref: "#/components/schemas/LicenseEntitlements"
+        current_fingerprint:
+          type: string
+        bound_fingerprint:
+          type: string
+          description: Fingerprint the license is bound to, if activated.
+        fingerprint_match:
+          type: boolean
+        grace_deadline:
+          type: integer
+          format: int64
+          description: Unix timestamp the grace period ends, if in the grace state.
+        last_error:
+          type: string
+
+    LicenseAuditEvent:
+      type: object
+      properties:
+        time:
+          type: string
+          format: date-time
+        state:
+          type: string
+        detail:
+          type: string
+
+    # -- Documents (prefix listing) ------------------------------------------
+    ListDocumentEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          description: The document's external ID.
+        text:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ListDocumentsResponse:
+      type: object
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListDocumentEntry"
+        next_cursor:
+          type: string
+          description: Cursor to pass back as `?cursor=` for the next page. Absent on the last page.
+
+    # -- Batch search ---------------------------------------------------------
+    BatchSearchRequest:
+      type: object
+      required: [queries]
+      properties:
+        queries:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchRequest"
+          maxItems: 128
+          description: Up to 128 independent queries, each valid on its own against `/search`.
+
+    BatchSearchResult:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResult"
+        total:
+          type: integer
+        error:
+          type: string
+          description: Set instead of `results`/`total` when this one query failed; the rest of the batch is unaffected.
+
+    BatchSearchResponse:
+      type: object
+      properties:
+        responses:
+          type: array
+          items:
+            $ref: "#/components/schemas/BatchSearchResult"
+          description: One entry per request query, in the same order.
+
+    # -- Flush / rebuild-graph / compact-all -----------------------------------
+    FlushIndexResponse:
+      type: object
+      properties:
+        flushed:
+          type: boolean
+          enum: [true]
+
+    RebuildGraphResponse:
+      type: object
+      properties:
+        rebuilt:
+          type: boolean
+          enum: [true]
+        chunks:
+          type: integer
+          description: Number of chunks the delta graph was rebuilt from.
+        wall_ms:
+          type: integer
+          format: int64
+          description: Wall-clock rebuild time in milliseconds.
+
+    CompactAllSkipped:
+      type: object
+      properties:
+        index_id:
+          type: string
+        reason:
+          type: string
+
+    CompactAllResponse:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+        total_indexes:
+          type: integer
+        queued:
+          type: array
+          items:
+            type: string
+          description: IDs of indexes newly scheduled by this request.
+        queued_count:
+          type: integer
+        skipped:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompactAllSkipped"
+          description: Indexes already queued or in flight, skipped rather than re-queued.
+        skipped_count:
+          type: integer
+        message:
+          type: string
+
+    # -- Admin embed-space ------------------------------------------------------
+    EmbedSpaceIndexRow:
+      type: object
+      properties:
+        index_id:
+          type: string
+        tenant_id:
+          type: string
+        loaded:
+          type: boolean
+          description: Whether this index is currently resident in memory (vs. classified by peeking its on-disk header).
+        state:
+          type: string
+          enum:
+            - unknown
+            - verified
+            - mismatch
+            - external_unverified
+            - external_agree
+            - external_diverged
+        embed_fingerprint:
+          type: string
+          description: The index's own stored embedding fingerprint.
+        detail:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+          description: When this row's state was last resolved. Absent if never checked.
+
+    EmbedSpaceAdminResponse:
+      type: object
+      properties:
+        server_model:
+          type: string
+          description: Model name of the process-wide serving embedder.
+        server_dimension:
+          type: integer
+        server_embed_fingerprint:
+          type: string
+        policy:
+          type: string
+          enum: [warn, refuse_search, refuse_open]
+          description: |
+            Fleet-level mismatch policy resolved from
+            GRAPHANN_EMBEDDER_MISMATCH_POLICY. Global only -- per-index
+            allow-list overrides are visible on each index's own status
+            endpoint, not here.
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+          description: |
+            Count of indexes per state. Always has all six
+            EmbedSpaceState keys present, even at zero, so callers can
+            distinguish "no indexes in this state" from "this state
+            doesn't exist". sum(counts.values()) == len(indexes).
+        indexes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmbedSpaceIndexRow"
+
+    # -- Backups ----------------------------------------------------------------
+    BackupChunkInfo:
+      type: object
+      properties:
+        key:
+          type: string
+          description: Storage key for this chunk.
+        size:
+          type: integer
+          format: int64
+          description: Compressed on-storage size in bytes.
+        sha256:
+          type: string
+        uncompressed_size:
+          type: integer
+          format: int64
+
+    BackupMeta:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+        index_id:
+          type: string
+        graphann_version:
+          type: string
+        description:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+
+    BackupManifest:
+      type: object
+      properties:
+        version:
+          type: integer
+        id:
+          type: string
+          description: Same value as the backup id returned alongside the manifest.
+        created_at:
+          type: string
+          format: date-time
+        meta:
+          $ref: "#/components/schemas/BackupMeta"
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupChunkInfo"
+        total_size:
+          type: integer
+          format: int64
+
+    CreateBackupResponse:
+      type: object
+      properties:
+        backup_id:
+          type: string
+        manifest:
+          $ref: "#/components/schemas/BackupManifest"
+
+    BackupSummary:
+      type: object
+      description: |
+        Condensed view returned by list-backups. NOTE: this struct has
+        no JSON tags on the server, so the field names below are the Go
+        field names verbatim (capitalized), not the snake_case used
+        elsewhere in this API.
+      properties:
+        ID:
+          type: string
+        TenantID:
+          type: string
+        IndexID:
+          type: string
+        CreatedAt:
+          type: string
+          format: date-time
+        TotalSize:
+          type: integer
+          format: int64
+        NumChunks:
+          type: integer
+
+    ListBackupsResponse:
+      type: object
+      properties:
+        backups:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupSummary"
+
+    RestoreBackupRequest:
+      type: object
+      required: [dest_index]
+      properties:
+        dest_index:
+          type: string
+          description: Destination index within the path tenant. The destination directory must be empty -- restore refuses to overwrite existing data.
+
+    RestoreBackupResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [restored]
+        index_id:
+          type: string
+
+    DeleteBackupResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [deleted]

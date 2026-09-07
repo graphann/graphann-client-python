@@ -531,8 +531,9 @@ def test_delete_chunks_sends_id_list_to_placeholder_path(
 
 
 def test_delete_chunks_rejects_empty_list(url: str) -> None:
-    with make_client(url) as c, pytest.raises(
-        ValueError, match="at least one chunk id"
+    with (
+        make_client(url) as c,
+        pytest.raises(ValueError, match="at least one chunk id"),
     ):
         c.delete_chunks("t_unit", "i_1", [])
 
@@ -791,6 +792,7 @@ def test_search_full_parses_sharded_fields(httpx_mock: HTTPXMock, url: str) -> N
             "shards_total": 3,
             "shards_ok": 2,
             "degraded_shards": ["shard-2"],
+            "rerank_applied": True,
         },
     )
     with make_client(url) as c:
@@ -801,12 +803,13 @@ def test_search_full_parses_sharded_fields(httpx_mock: HTTPXMock, url: str) -> N
     assert resp.shards_total == 3
     assert resp.shards_ok == 2
     assert resp.degraded_shards == ["shard-2"]
+    assert resp.rerank_applied is True
 
 
 def test_search_full_local_path_leaves_shard_fields_none(
     httpx_mock: HTTPXMock, url: str
 ) -> None:
-    # Non-sharded deployments return exactly {"results", "total"}.
+    # Older deployments can omit all optional search diagnostics.
     httpx_mock.add_response(
         url=f"{url}/v1/tenants/t_unit/indexes/i_1/search",
         method="POST",
@@ -818,6 +821,7 @@ def test_search_full_local_path_leaves_shard_fields_none(
     assert resp.shards_total is None
     assert resp.shards_ok is None
     assert resp.degraded_shards is None
+    assert resp.rerank_applied is None
 
 
 def test_cleanup_orphans_passes_min_age_and_dry_run(

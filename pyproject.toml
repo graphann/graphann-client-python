@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphann"
-version = "0.8.0"
+version = "0.9.1"
 description = "Official Python SDK for the GraphANN vector database."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -46,6 +46,7 @@ dev = [
   "mypy>=1.10",
   "ruff>=0.5",
   "build>=1.2",
+  "datamodel-code-generator>=0.25,<1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -54,6 +55,9 @@ packages = ["src/graphann"]
 [tool.hatch.build.targets.sdist]
 include = [
   "src/graphann",
+  "scripts",
+  "tests",
+  "api/openapi/spec.yaml",
   "README.md",
   "LICENSE",
   "CHANGELOG.md",
@@ -74,6 +78,10 @@ filterwarnings = [
 python_version = "3.10"
 strict = true
 files = ["src/graphann"]
+# Generated file: datamodel-codegen emits conint()/constr() call-expressions
+# as annotations, which mypy cannot type-check regardless of strictness.
+# Not hand-edited, so not worth suppressing per-line either.
+exclude = ["src/graphann/_generated\\.py$"]
 warn_unused_configs = true
 disallow_any_generics = true
 disallow_untyped_defs = true
@@ -101,6 +109,9 @@ line_length = 100
 line-length = 100
 target-version = "py310"
 src = ["src", "tests"]
+# Generated file: not hand-edited, not hand-formatted -- staleness is
+# enforced separately by tests/test_generated_staleness.py.
+extend-exclude = ["src/graphann/_generated.py"]
 
 [tool.ruff.lint]
 select = [

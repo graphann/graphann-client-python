@@ -15,6 +15,7 @@ import time
 from collections.abc import Iterable, Mapping
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -71,7 +72,7 @@ class Client:
             many seconds.
         cache_max_entries: Cache size cap. Defaults to 256.
         gzip_threshold: Minimum body size (bytes) before requests are
-            gzip-encoded. Set to 0 to disable.
+            gzip-encoded. Disabled by default (0); opt in only when supported.
         metrics_hook: Optional callable invoked on each request with
             ``(name, value, labels)``.
         transport: Optional ``httpx.BaseTransport`` for tests.
@@ -248,10 +249,12 @@ class Client:
         tenant_override: str | None = None,
         cacheable: bool = False,
         coalesce: bool = False,
+        read_only: bool = False,
     ) -> Any:
         plan = self._build_plan(
             method, path, body=body, params=params, tenant_override=tenant_override
         )
+        generation = self._cache.generation if self._cache is not None else 0
         cache_key: str | None = None
         if cacheable and self._cache is not None and method.upper() in {"GET", "POST"}:
             cache_key = make_cache_key(
@@ -262,13 +265,18 @@ class Client:
                 return cached
 
         if coalesce:
-            sf_key = make_cache_key(method, path, plan.cache_payload(), self.tenant_id)
+            sf_key = f"{generation}:" + make_cache_key(
+                method, path, plan.cache_payload(), self.tenant_id
+            )
             result = self._singleflight.call(sf_key, lambda: self._send(plan))
         else:
             result = self._send(plan)
 
-        if cache_key is not None and self._cache is not None:
-            self._cache.set(cache_key, result)
+        if self._cache is not None:
+            if not read_only and method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+                self._cache.clear()
+            elif cache_key is not None:
+                self._cache.set(cache_key, result, generation=generation)
         return result
 
     @staticmethod
@@ -286,16 +294,6 @@ class Client:
     def _dump(model: BaseModel) -> dict[str, Any]:
         """Serialise a request model dropping None fields."""
         return model.model_dump(mode="json", exclude_none=True)
-
-    def _invalidate_search_cache(self) -> None:
-        """Drop the entire response cache.
-
-        Called on operations that change index contents — embeddings,
-        documents added/removed, model swapped — so subsequent reads
-        don't return stale data.
-        """
-        if self._cache is not None:
-            self._cache.clear()
 
     # ==================================================================
     # Health
@@ -322,7 +320,7 @@ class Client:
         """``POST /v1/tenants``."""
         body = self._dump(M.CreateTenantRequest(name=name, id=id))
         data = self._request("POST", "/v1/tenants", body=body)
-        self._invalidate_search_cache()
+
         return self._validate(M.Tenant, data)
 
     def get_tenant(self, tenant_id: str) -> M.Tenant:
@@ -333,7 +331,7 @@ class Client:
     def delete_tenant(self, tenant_id: str) -> dict[str, Any]:
         """``DELETE /v1/tenants/{tenantID}``."""
         data = self._request("DELETE", f"/v1/tenants/{tenant_id}")
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     # ==================================================================
@@ -364,7 +362,7 @@ class Client:
             )
         )
         data = self._request("POST", f"/v1/tenants/{tenant_id}/indexes", body=body)
-        self._invalidate_search_cache()
+
         return self._validate(M.Index, data)
 
     def get_index(self, tenant_id: str, index_id: str) -> M.Index:
@@ -382,16 +380,27 @@ class Client:
         description: str | None = None,
         compression: str | None = None,
         approximate: bool | None = None,
+        embedding_backend: str | None = None,
+        embedding_model: str | None = None,
+        embedding_endpoint: str | None = None,
+        embedding_dimension: int | None = None,
+        embedding_api_key_env: str | None = None,
     ) -> M.Index:
         """``PATCH .../indexes/{indexID}`` — partial merge; omitted
         (``None``) fields are untouched.
 
-        ``compression`` accepts ``""``, ``"none"``, ``"scalar"``,
-        ``"binary"``, ``"pq"``, ``"recompute"``. A compression change
-        persists metadata only — no rebuild; it takes effect at the next
-        compaction. Note ``""`` and ``"none"`` both fold to the server's
-        ``--default-compression``. ``approximate`` changes propagate to a
-        loaded live index immediately.
+        Set ``compression`` to ``"scalar"``, ``"binary"``, ``"pq"``, or
+        ``"recompute"`` to select a mode. Leave it ``None`` to retain the
+        current setting. A compression change persists metadata only —
+        no rebuild; it takes effect at the next compaction. ``approximate``
+        changes propagate to a loaded live index immediately.
+
+        The ``embedding_*`` fields set a per-index embedding backend
+        override (remote backends only — ``""`` | ``"ollama"`` |
+        ``"openai"``; ``""`` clears the override back to the process-wide
+        embedder). ``embedding_endpoint`` is SSRF-validated server-side.
+        ``embedding_api_key_env`` names an ENV VAR holding the backend key
+        — never send the key itself.
         """
         body = self._dump(
             M.UpdateIndexRequest(
@@ -399,17 +408,21 @@ class Client:
                 description=description,
                 compression=compression,
                 approximate=approximate,
+                embedding_backend=embedding_backend,
+                embedding_model=embedding_model,
+                embedding_endpoint=embedding_endpoint,
+                embedding_dimension=embedding_dimension,
+                embedding_api_key_env=embedding_api_key_env,
             )
         )
         data = self._request(
             "PATCH", f"/v1/tenants/{tenant_id}/indexes/{index_id}", body=body
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.Index, data)
 
     def delete_index(self, tenant_id: str, index_id: str) -> None:
         self._request("DELETE", f"/v1/tenants/{tenant_id}/indexes/{index_id}")
-        self._invalidate_search_cache()
 
     def get_index_status(self, tenant_id: str, index_id: str) -> M.IndexStatus:
         data = self._request(
@@ -438,6 +451,20 @@ class Client:
         )
         return data if isinstance(data, dict) else {}
 
+    def compact_all_indexes(self, tenant_id: str) -> M.CompactAllResponse:
+        """``POST /v1/tenants/{tenantID}/indexes/compact-all``.
+
+        Queues every index owned by the tenant onto the compaction
+        scheduler; indexes compact one at a time. An index already
+        queued or in flight is reported in ``skipped`` rather than
+        re-queued. Raises :class:`graphann.errors.ConflictError` (HTTP
+        409) if the server has no compaction scheduler wired. Track
+        progress via :meth:`list_jobs`.
+        """
+        data = self._request("POST", f"/v1/tenants/{tenant_id}/indexes/compact-all")
+
+        return self._validate(M.CompactAllResponse, data)
+
     def flush_index(self, tenant_id: str, index_id: str) -> M.FlushResponse:
         """``POST .../flush`` — persist the live index's in-memory delta.
 
@@ -449,7 +476,7 @@ class Client:
         data = self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/flush"
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.FlushResponse, data)
 
     def rebuild_graph(self, tenant_id: str, index_id: str) -> M.RebuildGraphResponse:
@@ -463,14 +490,14 @@ class Client:
         data = self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/rebuild-graph"
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.RebuildGraphResponse, data)
 
     def clear_index(self, tenant_id: str, index_id: str) -> dict[str, Any]:
         data = self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/clear"
         )
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     # ==================================================================
@@ -538,7 +565,7 @@ class Client:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents",
             body=payload,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.AddDocumentsResponse, data)
 
     def import_documents(
@@ -554,7 +581,7 @@ class Client:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/import",
             body=payload,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.ImportDocumentsResponse, data)
 
     def get_pending_status(self, tenant_id: str, index_id: str) -> M.PendingStatus:
@@ -569,7 +596,7 @@ class Client:
         data = self._request(
             "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/process"
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.ProcessPendingResponse, data)
 
     def clear_pending(self, tenant_id: str, index_id: str) -> dict[str, Any]:
@@ -594,7 +621,7 @@ class Client:
             "DELETE",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents/{document_id}",
         )
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     def list_documents(
@@ -636,7 +663,7 @@ class Client:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.BulkDeleteResponse, data)
 
     def bulk_delete_by_external_ids(
@@ -648,7 +675,7 @@ class Client:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/documents/by-external-id",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.BulkDeleteByExternalIdsResponse, data)
 
     def cleanup_orphans(
@@ -727,7 +754,7 @@ class Client:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/chunks/0",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.DeleteChunksResponse, data)
 
     # ==================================================================
@@ -741,12 +768,14 @@ class Client:
         *,
         query: str | None = None,
         vector: list[float] | None = None,
+        vector_b64: str | None = None,
         k: int | None = 10,
         filter: M.SearchFilter | dict[str, Any] | None = None,
         rerank: bool | None = None,
         candidate_k: int | None = None,
         rerank_k: int | None = None,
         ef_search: int | None = None,
+        hybrid: bool | None = None,
         coalesce: bool = True,
         cache: bool = True,
     ) -> list[M.SearchResult]:
@@ -776,12 +805,14 @@ class Client:
             index_id,
             query=query,
             vector=vector,
+            vector_b64=vector_b64,
             k=k,
             filter=filter,
             rerank=rerank,
             candidate_k=candidate_k,
             rerank_k=rerank_k,
             ef_search=ef_search,
+            hybrid=hybrid,
             coalesce=coalesce,
             cache=cache,
         ).results
@@ -793,12 +824,14 @@ class Client:
         *,
         query: str | None = None,
         vector: list[float] | None = None,
+        vector_b64: str | None = None,
         k: int | None = 10,
         filter: M.SearchFilter | dict[str, Any] | None = None,
         rerank: bool | None = None,
         candidate_k: int | None = None,
         rerank_k: int | None = None,
         ef_search: int | None = None,
+        hybrid: bool | None = None,
         coalesce: bool = True,
         cache: bool = True,
     ) -> M.SearchResponse:
@@ -811,26 +844,66 @@ class Client:
         so those fields stay ``None``. Caveat: rerank options are NOT
         applied on the sharded path.
         """
-        if query is None and vector is None:
-            raise ValueError("search requires either query or vector")
+        if query is None and vector is None and vector_b64 is None:
+            raise ValueError(
+                "search requires query, vector, or vector_b64 (query or vector required)"
+            )
         body = M.SearchRequest(
             query=query,
             vector=vector,
+            vector_b64=vector_b64,
             k=k,
             filter=_coerce_filter(filter),
             rerank=rerank,
             candidate_k=candidate_k,
             rerank_k=rerank_k,
             ef_search=ef_search,
+            hybrid=hybrid,
         )
         data = self._request(
             "POST",
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/search",
             body=self._dump(body),
+            read_only=True,
             cacheable=cache,
             coalesce=coalesce,
         )
         return self._validate(M.SearchResponse, data)
+
+    def batch_search(
+        self,
+        tenant_id: str,
+        index_id: str,
+        queries: Iterable[M.SearchRequest | dict[str, Any]],
+    ) -> M.BatchSearchResponse:
+        """``POST .../search/batch`` — up to 128 independent queries in one request.
+
+        Each entry in ``queries`` is a full :class:`~graphann.models.SearchRequest`
+        (text or vector, filters, rerank, hybrid — anything valid on
+        :meth:`search` is valid here). One failing query does not fail the
+        batch: its slot in the response carries ``error`` instead of
+        ``results``/``total``. Intended for offline/pipeline callers; the
+        result cache used by :meth:`search` does not apply here.
+        """
+        payload: list[dict[str, Any]] = []
+        for q in queries:
+            if isinstance(q, M.SearchRequest):
+                payload.append(q.model_dump(mode="json", exclude_none=True))
+            elif isinstance(q, dict):
+                payload.append(
+                    M.SearchRequest.model_validate(q).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                )
+            else:
+                raise TypeError(f"unsupported query type: {type(q).__name__}")
+        data = self._request(
+            "POST",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/search/batch",
+            body={"queries": payload},
+            read_only=True,
+        )
+        return self._validate(M.BatchSearchResponse, data)
 
     def upsert_resource(
         self,
@@ -840,19 +913,40 @@ class Client:
         text: str,
         *,
         metadata: dict[str, str] | None = None,
+        external_id: str | None = None,
+        repo_id: str | None = None,
+        file_path: str | None = None,
+        commit_sha: str | None = None,
+        source_type: str | None = None,
+        owner_user_id: str | None = None,
+        title: str | None = None,
+        url: str | None = None,
     ) -> M.UpsertResourceResponse:
         """``PUT /v1/tenants/{tid}/indexes/{iid}/resources/{resID}``.
 
         Atomically creates or replaces all chunks for ``resource_id``.
         Returns operation="create" on first upsert, "update" on subsequent ones.
         """
-        body = self._dump(M.UpsertResourceRequest(text=text, metadata=metadata))
+        body = self._dump(
+            M.UpsertResourceRequest(
+                text=text,
+                metadata=metadata,
+                external_id=external_id,
+                repo_id=repo_id,
+                file_path=file_path,
+                commit_sha=commit_sha,
+                source_type=source_type,
+                owner_user_id=owner_user_id,
+                title=title,
+                url=url,
+            )
+        )
         data = self._request(
             "PUT",
-            f"/v1/tenants/{tenant_id}/indexes/{index_id}/resources/{resource_id}",
+            f"/v1/tenants/{tenant_id}/indexes/{index_id}/resources/{quote(resource_id, safe='')}",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.UpsertResourceResponse, data)
 
     # ------------------------------------------------------------------
@@ -885,7 +979,7 @@ class Client:
             "documents": payload_docs,
         }
         data = self._request("POST", f"/v1/orgs/{org_id}/documents", body=body)
-        self._invalidate_search_cache()
+
         return self._validate(M.OrgSyncResponse, data)
 
     def multi_search(
@@ -918,6 +1012,7 @@ class Client:
             "POST",
             f"/v1/orgs/{org_id}/users/{user_id}/search",
             body=self._dump(body),
+            read_only=True,
             cacheable=cache,
             coalesce=coalesce,
         )
@@ -963,7 +1058,7 @@ class Client:
             f"/v1/tenants/{tenant_id}/indexes/{index_id}/embedding-model",
             body=body,
         )
-        self._invalidate_search_cache()
+
         return self._validate(M.HotModelSwitchResponse, data)
 
     def get_job(self, job_id: str) -> M.Job:
@@ -1032,13 +1127,13 @@ class Client:
             settings = M.LLMSettings.model_validate(settings)
         body = settings.model_dump(mode="json", exclude_none=True)
         data = self._request("PATCH", f"/v1/orgs/{org_id}/llm-settings", body=body)
-        self._invalidate_search_cache()
+
         return self._validate(M.LLMSettings, data)
 
     def delete_llm_settings(self, org_id: str) -> dict[str, Any]:
         """``DELETE /v1/orgs/{orgID}/llm-settings`` — reset to defaults."""
         data = self._request("DELETE", f"/v1/orgs/{org_id}/llm-settings")
-        self._invalidate_search_cache()
+
         return data if isinstance(data, dict) else {}
 
     # ==================================================================
@@ -1059,6 +1154,102 @@ class Client:
     def revoke_api_key(self, tenant_id: str, key_id: str) -> dict[str, Any]:
         data = self._request("DELETE", f"/v1/tenants/{tenant_id}/api-keys/{key_id}")
         return data if isinstance(data, dict) else {}
+
+    # ==================================================================
+    # License
+    # ==================================================================
+
+    def get_license_status(self) -> M.LicenseStatus:
+        """``GET /v1/license/status``. Unauthenticated, like ``/health``.
+
+        Only mounted when the server was started with a license manager
+        — raises :class:`graphann.errors.NotFoundError` (HTTP 404)
+        otherwise.
+        """
+        data = self._request("GET", "/v1/license/status")
+        return self._validate(M.LicenseStatus, data)
+
+    def get_license_audit(
+        self, *, limit: int | None = None
+    ) -> list[M.LicenseAuditEvent]:
+        """``GET /v1/license/audit`` — this node's license state-transition
+        history, newest first. ``limit`` is clamped server-side to 1000."""
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        data = self._request("GET", "/v1/license/audit", params=params or None)
+        items = data if isinstance(data, list) else []
+        return [self._validate(M.LicenseAuditEvent, item) for item in items]
+
+    # ==================================================================
+    # Admin
+    # ==================================================================
+
+    def get_embed_space_admin(self) -> M.EmbedSpaceAdminResponse:
+        """``GET /v1/admin/embed-space`` — admin only.
+
+        Fleet-wide embedding-space observability: one row per catalog
+        index (cold indexes included, peeked from their on-disk header
+        without loading).
+        """
+        data = self._request("GET", "/v1/admin/embed-space")
+        return self._validate(M.EmbedSpaceAdminResponse, data)
+
+    # ==================================================================
+    # Backups
+    # ==================================================================
+
+    def create_backup(self, tenant_id: str, index_id: str) -> M.CreateBackupResponse:
+        """``POST .../indexes/{indexID}/backups`` — admin only.
+
+        Snapshots the index into the server's configured filesystem
+        backup storage. Raises :class:`graphann.errors.GraphANNError`
+        with ``status_code=501`` when the server was started without
+        ``--backup-dir``.
+        """
+        data = self._request(
+            "POST", f"/v1/tenants/{tenant_id}/indexes/{index_id}/backups"
+        )
+        return self._validate(M.CreateBackupResponse, data)
+
+    def list_backups(self, tenant_id: str) -> M.ListBackupsResponse:
+        """``GET /v1/tenants/{tenantID}/backups`` — admin only.
+
+        Note: ``BackupSummary`` fields are Go-cased (``ID``, ``TenantID``,
+        ``IndexID``, ``CreatedAt``, ``TotalSize``, ``NumChunks``) — the
+        server has no JSON tags on this struct, unlike the rest of the API.
+        """
+        data = self._request("GET", f"/v1/tenants/{tenant_id}/backups", cacheable=True)
+        return self._validate(M.ListBackupsResponse, data)
+
+    def restore_backup(
+        self, tenant_id: str, backup_id: str, dest_index: str
+    ) -> M.RestoreBackupResponse:
+        """``POST /v1/tenants/{tenantID}/backups/{backupID}/restore`` — admin only.
+
+        Restores into ``dest_index`` within the given tenant; the
+        destination directory must be empty. ``backup_id`` is
+        percent-encoded (it contains slashes).
+        """
+        body = self._dump(M.RestoreBackupRequest(dest_index=dest_index))
+        data = self._request(
+            "POST",
+            f"/v1/tenants/{tenant_id}/backups/{quote(backup_id, safe='')}/restore",
+            body=body,
+        )
+
+        return self._validate(M.RestoreBackupResponse, data)
+
+    def delete_backup(self, tenant_id: str, backup_id: str) -> M.DeleteBackupResponse:
+        """``DELETE /v1/tenants/{tenantID}/backups/{backupID}`` — admin only.
+
+        ``backup_id`` is percent-encoded (it contains slashes).
+        """
+        data = self._request(
+            "DELETE",
+            f"/v1/tenants/{tenant_id}/backups/{quote(backup_id, safe='')}",
+        )
+        return self._validate(M.DeleteBackupResponse, data)
 
 
 # ----------------------------------------------------------------------

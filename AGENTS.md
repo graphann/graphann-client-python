@@ -11,7 +11,7 @@ variant returns awaitables and yields async iterators for pagination.
 ## Install
 
 ```bash
-pip install graphann==0.8.0
+pip install graphann==0.9.0
 ```
 
 Requires Python 3.10+, httpx 0.27+, Pydantic 2.5+.
